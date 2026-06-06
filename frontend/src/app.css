@@ -1,0 +1,169 @@
+/* Penelope — linguagem visual alinhada com o Odysseus (paleta One Dark,
+   Fira Code monospace), mas reduzida ao mínimo: só o chat. */
+
+@font-face {
+	font-family: 'Fira Code';
+	font-weight: 300;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/FiraCode-Light.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Fira Code';
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/FiraCode-Regular.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Fira Code';
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/FiraCode-SemiBold.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Inter';
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/Inter-Regular.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Inter';
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/Inter-Medium.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Inter';
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+	src: url('/fonts/Inter-SemiBold.woff2') format('woff2');
+}
+
+:root {
+	/* Paleta One Dark (do Odysseus) */
+	--bg: #282c34;
+	--panel: #1e2228;
+	--panel-2: #16191f;
+	--fg: #9cdef2;
+	--fg-strong: #d7f1fb;
+	--fg-muted: #6b8a94;
+	--border: #355a66;
+	--accent: #00aaff;
+	--accent-hover: #66c7ff;
+	--green: #50fa7b;
+	--red: #e06c75;
+
+	/* Bolhas */
+	--user-bubble-bg: color-mix(in srgb, var(--fg) 8%, var(--bg));
+	--ai-bubble-bg: var(--panel);
+
+	--radius: 16px;
+
+	/* Profundidade e elevação */
+	--shadow-panel: 0 24px 60px -16px rgba(0, 0, 0, 0.65);
+	--glow-accent: 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
+	--ring-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+
+	--font-ui: 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
+	--font-body: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+
+	color-scheme: dark;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	height: 100%;
+	height: 100dvh;
+	color: var(--fg);
+	font-family: var(--font-ui);
+	font-size: 14px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+}
+
+/* Atmosfera: glow ciano subtil no topo + textura de grelha quase impercetível,
+   em vez de um fundo chapado. Dá profundidade sem ruído. */
+body {
+	background-color: var(--bg);
+	background-image:
+		radial-gradient(
+			1100px 520px at 50% -8%,
+			color-mix(in srgb, var(--accent) 9%, transparent),
+			transparent 62%
+		),
+		linear-gradient(color-mix(in srgb, var(--fg) 2.5%, transparent) 1px, transparent 1px),
+		linear-gradient(90deg, color-mix(in srgb, var(--fg) 2.5%, transparent) 1px, transparent 1px);
+	background-size: 100% 100%, 34px 34px, 34px 34px;
+	background-attachment: fixed;
+}
+
+::selection {
+	background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Acessibilidade: foco visível coerente em toda a app */
+:focus-visible {
+	outline: none;
+	box-shadow: var(--ring-focus);
+}
+
+/* Painéis (modais de Memória/Skills/Galeria/Pipeline): profundidade + entrada
+   coesa. As classes existem no DOM, por isso o estilo global alcança-as. */
+.overlay {
+	backdrop-filter: blur(7px) saturate(1.1);
+	-webkit-backdrop-filter: blur(7px) saturate(1.1);
+	animation: pen-fade 0.18s ease-out;
+}
+.panel {
+	box-shadow: var(--shadow-panel), var(--glow-accent);
+	animation: pen-pop 0.24s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes pen-fade {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+@keyframes pen-pop {
+	from {
+		opacity: 0;
+		transform: translateY(10px) scale(0.985);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.overlay,
+	.panel {
+		animation: none;
+	}
+}
+
+/* Scrollbar discreta, no tom do tema */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+	width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 4px;
+}

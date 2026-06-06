@@ -1,0 +1,23 @@
+# Dados locais (memória persistente) - nunca versionar
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python / uv
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.python-version
+
+# Node / SvelteKit
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
