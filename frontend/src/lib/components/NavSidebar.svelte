@@ -12,8 +12,8 @@
 		onRenameConvo,
 		onDeleteConvo,
 		onToggle,
-		onCycleTheme,
-		onOpenSearch
+		onOpenSearch,
+		userName = ''
 	}: {
 		activeView: string;
 		onSelectView: (v: string) => void;
@@ -24,8 +24,8 @@
 		onRenameConvo: (id: number, title: string) => void;
 		onDeleteConvo: (id: number) => void;
 		onToggle: () => void;
-		onCycleTheme: () => void;
 		onOpenSearch: () => void;
+		userName?: string;
 	} = $props();
 
 	const nav = [
@@ -35,7 +35,7 @@
 		{ id: 'gallery', icon: 'image', label: 'Galeria' },
 		{ id: 'notes', icon: 'sticky-note', label: 'Notas' },
 		{ id: 'tasks', icon: 'list-checks', label: 'Tarefas' },
-		{ id: 'pipeline', icon: 'file-text', label: 'Pipeline' }
+		{ id: 'agents', icon: 'bot', label: 'Agents' }
 	];
 
 	let editingId = $state<number | null>(null);
@@ -142,15 +142,22 @@
 			</button>
 		{/each}
 
-		<button class="row" onclick={onCycleTheme}>
-			<Icon name="palette" size={16} /><span>Tema</span>
-		</button>
 	</div>
 
 	<footer class="ns-foot">
-		<button class="row" class:active={activeView === 'settings'} onclick={() => onSelectView('settings')}>
-			<Icon name="settings" size={16} /><span>Definições</span>
-		</button>
+		<div class="user-bar">
+			<span class="avatar">{(userName || '?').slice(0, 1).toUpperCase()}</span>
+			<span class="uname">{userName || 'utilizador'}</span>
+			<button
+				class="gear"
+				class:active={activeView === 'settings'}
+				onclick={() => onSelectView('settings')}
+				title="Definições"
+				aria-label="Definições"
+			>
+				<Icon name="settings" size={16} />
+			</button>
+		</div>
 	</footer>
 </aside>
 
@@ -341,5 +348,49 @@
 	.ns-foot {
 		border-top: 1px solid var(--border);
 		padding: 8px;
+	}
+	.user-bar {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 6px 8px;
+	}
+	.avatar {
+		width: 28px;
+		height: 28px;
+		flex: none;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		background: color-mix(in srgb, var(--accent) 22%, transparent);
+		color: var(--accent);
+		font-weight: 700;
+		font-size: 13px;
+	}
+	.uname {
+		flex: 1;
+		min-width: 0;
+		font-size: 13px;
+		color: var(--fg);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.gear {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 30px;
+		height: 30px;
+		border-radius: 8px;
+		border: none;
+		background: transparent;
+		color: var(--fg-muted);
+		cursor: pointer;
+	}
+	.gear:hover,
+	.gear.active {
+		color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
 	}
 </style>

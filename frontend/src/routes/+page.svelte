@@ -7,21 +7,26 @@
 	import MemoryPanel from '$lib/components/MemoryPanel.svelte';
 	import GalleryPanel from '$lib/components/GalleryPanel.svelte';
 	import SkillsPanel from '$lib/components/SkillsPanel.svelte';
-	import PipelinePanel from '$lib/components/PipelinePanel.svelte';
+	import AgentsView from '$lib/views/AgentsView.svelte';
 	import NotesView from '$lib/views/NotesView.svelte';
 	import TasksView from '$lib/views/TasksView.svelte';
 	import CompareView from '$lib/views/CompareView.svelte';
 	import SettingsView from '$lib/views/SettingsView.svelte';
+	import Onboarding from '$lib/components/Onboarding.svelte';
+	import { applyTheme, loadTheme, applyAnimation } from '$lib/theme';
 	import {
 		listConversations,
 		renameConversation,
 		deleteConversation,
+		getSettings,
 		type ConversationSummary
 	} from '$lib/api';
 
 	let activeView = $state('chat');
 	let sidebarOpen = $state(true);
 	let showSearch = $state(false);
+	let showOnboarding = $state(false);
+	let userName = $state('');
 
 	let conversations = $state<ConversationSummary[]>([]);
 	let chatConvoId = $state<number | null>(null); // ligado ao ChatView
@@ -30,8 +35,16 @@
 
 	onMount(() => {
 		refreshConversations();
-		themeIdx = loadThemeIndex();
-		applyTheme(themeIdx);
+		const th = loadTheme();
+		applyTheme(th);
+		applyAnimation(th, true);
+		getSettings()
+			.then((s) => {
+				userName = s.user_name || '';
+				applyAnimation(th, s.ui_anim);
+				if (!s.onboarded) showOnboarding = true;
+			})
+			.catch(() => {});
 		const onKey = (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 				e.preventDefault();
@@ -68,30 +81,6 @@
 		await refreshConversations();
 	}
 
-	// ---- Tema (cicla a cor de acento; persiste em localStorage) ----
-	const THEMES = [
-		{ accent: '#00aaff', hover: '#66c7ff' },
-		{ accent: '#50fa7b', hover: '#7dffa0' },
-		{ accent: '#e06c75', hover: '#ff8a93' },
-		{ accent: '#c678dd', hover: '#d99bee' }
-	];
-	function loadThemeIndex(): number {
-		const v = typeof localStorage !== 'undefined' ? localStorage.getItem('pen-theme') : null;
-		return v ? Number(v) % THEMES.length : 0;
-	}
-	function applyTheme(i: number) {
-		const t = THEMES[i];
-		document.documentElement.style.setProperty('--accent', t.accent);
-		document.documentElement.style.setProperty('--accent-hover', t.hover);
-	}
-	let themeIdx = $state(0);
-	function cycleTheme() {
-		themeIdx = (themeIdx + 1) % THEMES.length;
-		applyTheme(themeIdx);
-		try {
-			localStorage.setItem('pen-theme', String(themeIdx));
-		} catch {}
-	}
 </script>
 
 <div class="shell">
@@ -106,8 +95,8 @@
 			onRenameConvo={renameConvo}
 			onDeleteConvo={deleteConvo}
 			onToggle={() => (sidebarOpen = false)}
-			onCycleTheme={cycleTheme}
 			onOpenSearch={() => (showSearch = true)}
+			{userName}
 		/>
 	{/if}
 
@@ -142,8 +131,8 @@
 			<TasksView />
 		{:else if activeView === 'gallery'}
 			<GalleryPanel inline onOpenConversation={selectConvo} />
-		{:else if activeView === 'pipeline'}
-			<PipelinePanel inline />
+		{:else if activeView === 'agents'}
+			<AgentsView />
 		{:else if activeView === 'compare'}
 			<CompareView />
 		{:else if activeView === 'settings'}
@@ -154,6 +143,15 @@
 
 {#if showSearch}
 	<SearchPalette onClose={() => (showSearch = false)} onOpen={selectConvo} />
+{/if}
+
+{#if showOnboarding}
+	<Onboarding
+		onDone={(n) => {
+			userName = n;
+			showOnboarding = false;
+		}}
+	/>
 {/if}
 
 <style>

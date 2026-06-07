@@ -22,6 +22,7 @@ export async function streamChat(
 	cb: ChatCallbacks,
 	imageBase64?: string | null,
 	model?: string | null,
+	incognito?: boolean,
 	signal?: AbortSignal
 ): Promise<void> {
 	let res: Response;
@@ -33,7 +34,8 @@ export async function streamChat(
 				message,
 				conversation_id: conversationId,
 				image_base64: imageBase64 ?? null,
-				model: model ?? null
+				model: model ?? null,
+				incognito: !!incognito
 			}),
 			signal
 		});

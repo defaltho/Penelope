@@ -5,10 +5,60 @@
 		createSkill,
 		updateSkill,
 		deleteSkill,
-		type Skill
+		exportSkills,
+		importSkills,
+		listPendingSkills,
+		approvePendingSkill,
+		rejectPendingSkill,
+		type Skill,
+		type PendingSkill
 	} from '$lib/api';
+	import { downloadJson, pickJsonFile } from '$lib/io';
+	import Icon from './Icon.svelte';
+
+	let pending = $state<PendingSkill[]>([]);
+
+	async function loadPending() {
+		try {
+			pending = await listPendingSkills();
+		} catch (e) {
+			console.error('falha a carregar skills pendentes', e);
+		}
+	}
+	async function approveP(p: PendingSkill) {
+		pending = pending.filter((x) => x.id !== p.id);
+		await approvePendingSkill(p.id);
+		await load();
+	}
+	async function rejectP(p: PendingSkill) {
+		pending = pending.filter((x) => x.id !== p.id);
+		await rejectPendingSkill(p.id);
+	}
 
 	let { onClose, inline = false }: { onClose?: () => void; inline?: boolean } = $props();
+
+	async function doExport() {
+		try {
+			downloadJson('penelope-skills.json', await exportSkills());
+		} catch (e) {
+			console.error('export falhou', e);
+		}
+	}
+	async function doImport() {
+		try {
+			const data = await pickJsonFile();
+			const arr = Array.isArray(data) ? data : (data as any)?.skills;
+			if (!Array.isArray(arr)) {
+				alert('ficheiro inválido: esperado uma lista de skills');
+				return;
+			}
+			const { added } = await importSkills(arr);
+			alert(`${added} skill(s) importada(s).`);
+			await load();
+		} catch (e) {
+			alert('importação falhou: ficheiro inválido?');
+		}
+	}
 
 	let skills = $state<Skill[]>([]);
 	let loading = $state(true);
@@ -18,7 +68,10 @@
 	let editName = $state('');
 	let editInstruction = $state('');
 
-	onMount(load);
+	onMount(() => {
+		load();
+		loadPending();
+	});
 
 	async function load() {
 		loading = true;
@@ -81,9 +134,17 @@
 	<div class="panel" class:inline role="dialog" aria-label="Skills">
 		<header class="panel-head">
 			<h2><span class="dot"></span>Skills <span class="count">{skills.length}</span></h2>
-			{#if !inline}
-				<button class="close" onclick={() => onClose?.()} aria-label="Fechar">×</button>
-			{/if}
+			<div class="head-actions">
+				<button class="io-btn" onclick={doImport} title="Importar">
+					<Icon name="upload" size={14} /> importar
+				</button>
+				<button class="io-btn" onclick={doExport} title="Exportar">
+					<Icon name="download" size={14} /> exportar
+				</button>
+				{#if !inline}
+					<button class="close" onclick={() => onClose?.()} aria-label="Fechar">×</button>
+				{/if}
+			</div>
 		</header>
 
 		<div class="body">
@@ -98,6 +159,26 @@
 					+ adicionar skill
 				</button>
 			</div>
+
+			{#if pending.length}
+				<div class="pending">
+					<div class="pending-head">
+						<Icon name="lightbulb" size={13} /> a aprovar <span class="count">{pending.length}</span>
+					</div>
+					{#each pending as p (p.id)}
+						<div class="pend-item">
+							<div class="pend-main">
+								<span class="pend-name">{p.name}</span>
+								<span class="pend-instr">{p.instruction}</span>
+							</div>
+							<div class="pend-actions">
+								<button class="ok" onclick={() => approveP(p)} title="Aprovar" aria-label="Aprovar">✓</button>
+								<button class="no" onclick={() => rejectP(p)} title="Rejeitar" aria-label="Rejeitar">✕</button>
+							</div>
+						</div>
+					{/each}
+				</div>
+			{/if}
 
 			<div class="list">
 				{#if loading}
@@ -224,6 +305,29 @@
 	.close:hover {
 		color: var(--fg-strong);
 	}
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.io-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		font-family: var(--font-ui);
+		font-size: 11px;
+		padding: 5px 9px;
+		border-radius: 8px;
+		cursor: pointer;
+		transition: color 0.14s, border-color 0.14s;
+	}
+	.io-btn:hover {
+		color: var(--accent);
+		border-color: var(--accent);
+	}
 
 	.body {
 		flex: 1;
@@ -282,6 +386,77 @@
 		font-size: 13px;
 		text-align: center;
 		margin: 24px 0;
+	}
+
+	.pending {
+		margin-bottom: 16px;
+		padding: 8px;
+		border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+		border-radius: 12px;
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
+	}
+	.pending-head {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.4px;
+		color: var(--accent);
+		padding: 2px 4px 8px;
+	}
+	.pend-item {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 8px 4px;
+	}
+	.pend-main {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 3px;
+		min-width: 0;
+	}
+	.pend-name {
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--fg-strong);
+	}
+	.pend-instr {
+		font-family: var(--font-body);
+		font-size: 12.5px;
+		color: var(--fg);
+		line-height: 1.4;
+	}
+	.pend-actions {
+		display: flex;
+		gap: 4px;
+	}
+	.pend-actions button {
+		width: 24px;
+		height: 24px;
+		border-radius: 7px;
+		border: 1px solid var(--border);
+		background: transparent;
+		cursor: pointer;
+		font-size: 12px;
+		line-height: 1;
+	}
+	.pend-actions .ok {
+		color: var(--green);
+		border-color: color-mix(in srgb, var(--green) 45%, transparent);
+	}
+	.pend-actions .ok:hover {
+		background: color-mix(in srgb, var(--green) 18%, transparent);
+	}
+	.pend-actions .no {
+		color: var(--red);
+		border-color: color-mix(in srgb, var(--red) 45%, transparent);
+	}
+	.pend-actions .no:hover {
+		background: color-mix(in srgb, var(--red) 18%, transparent);
 	}
 
 	.skill {

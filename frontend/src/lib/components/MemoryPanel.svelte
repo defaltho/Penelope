@@ -1,6 +1,38 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { listFacts, editFact, deleteFact, type Fact } from '$lib/api';
+	import {
+		listFacts,
+		editFact,
+		deleteFact,
+		exportFacts,
+		importFacts,
+		listPending,
+		approvePending,
+		rejectPending,
+		type Fact,
+		type PendingFact
+	} from '$lib/api';
+	import { downloadJson, pickJsonFile } from '$lib/io';
+	import Icon from './Icon.svelte';
+
+	let pending = $state<PendingFact[]>([]);
+
+	async function loadPending() {
+		try {
+			pending = await listPending();
+		} catch (e) {
+			console.error('falha a carregar pendentes', e);
+		}
+	}
+	async function approve(p: PendingFact) {
+		pending = pending.filter((x) => x.id !== p.id);
+		await approvePending(p.id);
+		await load();
+	}
+	async function reject(p: PendingFact) {
+		pending = pending.filter((x) => x.id !== p.id);
+		await rejectPending(p.id);
+	}
 
 	let { onClose, inline = false }: { onClose?: () => void; inline?: boolean } = $props();
 
@@ -16,7 +48,10 @@
 
 	const shown = $derived(typeFilter ? facts.filter((f) => f.fact_type === typeFilter) : facts);
 
-	onMount(load);
+	onMount(() => {
+		load();
+		loadPending();
+	});
 
 	async function load() {
 		loading = true;
@@ -59,6 +94,30 @@
 		await deleteFact(f.id);
 		facts = facts.filter((x) => x.id !== f.id);
 	}
+
+	async function doExport() {
+		try {
+			downloadJson('penelope-memoria.json', await exportFacts());
+		} catch (e) {
+			console.error('export falhou', e);
+		}
+	}
+	async function doImport() {
+		try {
+			const data = await pickJsonFile();
+			const arr = Array.isArray(data) ? data : (data as any)?.facts;
+			if (!Array.isArray(arr)) {
+				alert('ficheiro inválido: esperado uma lista de factos');
+				return;
+			}
+			const { added } = await importFacts(arr);
+			alert(`${added} facto(s) importado(s).`);
+			query = '';
+			await load();
+		} catch (e) {
+			alert('importação falhou: ficheiro inválido?');
+		}
+	}
 </script>
 
 <div
@@ -72,9 +131,17 @@
 	<div class="panel" class:inline role="dialog" aria-label="Memória">
 		<header class="panel-head">
 			<h2><span class="dot"></span>Memória <span class="count">{facts.length}</span></h2>
-			{#if !inline}
-				<button class="close" onclick={() => onClose?.()} aria-label="Fechar">×</button>
-			{/if}
+			<div class="head-actions">
+				<button class="io-btn" onclick={doImport} title="Importar">
+					<Icon name="upload" size={14} /> importar
+				</button>
+				<button class="io-btn" onclick={doExport} title="Exportar">
+					<Icon name="download" size={14} /> exportar
+				</button>
+				{#if !inline}
+					<button class="close" onclick={() => onClose?.()} aria-label="Fechar">×</button>
+				{/if}
+			</div>
 		</header>
 
 		<div class="controls">
@@ -95,6 +162,24 @@
 				{/each}
 			</div>
 		</div>
+
+		{#if pending.length}
+			<div class="pending">
+				<div class="pending-head">
+					<Icon name="brain" size={13} /> a aprovar <span class="count">{pending.length}</span>
+				</div>
+				{#each pending as p (p.id)}
+					<div class="pend-item">
+						<span class="tag tag-{p.fact_type}">{p.fact_type}</span>
+						<span class="pend-text">{p.text}</span>
+						<div class="pend-actions">
+							<button class="ok" onclick={() => approve(p)} title="Aprovar" aria-label="Aprovar">✓</button>
+							<button class="no" onclick={() => reject(p)} title="Rejeitar" aria-label="Rejeitar">✕</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		{/if}
 
 		<div class="fact-list">
 			{#if loading}
@@ -213,6 +298,29 @@
 	.close:hover {
 		color: var(--fg-strong);
 	}
+	.head-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.io-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		font-family: var(--font-ui);
+		font-size: 11px;
+		padding: 5px 9px;
+		border-radius: 8px;
+		cursor: pointer;
+		transition: color 0.14s, border-color 0.14s;
+	}
+	.io-btn:hover {
+		color: var(--accent);
+		border-color: var(--accent);
+	}
 
 	.controls {
 		padding: 12px 18px;
@@ -252,6 +360,66 @@
 	.chip.active {
 		color: var(--accent);
 		border-color: var(--accent);
+	}
+
+	.pending {
+		margin: 4px 14px 0;
+		padding: 8px;
+		border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+		border-radius: 11px;
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
+	}
+	.pending-head {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 11px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.4px;
+		color: var(--accent);
+		padding: 2px 4px 8px;
+	}
+	.pend-item {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 7px 4px;
+	}
+	.pend-text {
+		flex: 1;
+		font-family: var(--font-body);
+		font-size: 13.5px;
+		color: var(--fg-strong);
+		line-height: 1.4;
+	}
+	.pend-actions {
+		display: flex;
+		gap: 4px;
+	}
+	.pend-actions button {
+		width: 24px;
+		height: 24px;
+		border-radius: 7px;
+		border: 1px solid var(--border);
+		background: transparent;
+		cursor: pointer;
+		font-size: 12px;
+		line-height: 1;
+	}
+	.pend-actions .ok {
+		color: var(--green);
+		border-color: color-mix(in srgb, var(--green) 45%, transparent);
+	}
+	.pend-actions .ok:hover {
+		background: color-mix(in srgb, var(--green) 18%, transparent);
+	}
+	.pend-actions .no {
+		color: var(--red);
+		border-color: color-mix(in srgb, var(--red) 45%, transparent);
+	}
+	.pend-actions .no:hover {
+		background: color-mix(in srgb, var(--red) 18%, transparent);
 	}
 
 	.fact-list {

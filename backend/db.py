@@ -143,6 +143,23 @@ CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Factos candidatos a aprovar (modo de revisão da memória autónoma).
+CREATE TABLE IF NOT EXISTS pending_facts (
+    id          INTEGER PRIMARY KEY,
+    text        TEXT NOT NULL,
+    fact_type   TEXT,
+    source_turn INTEGER,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Skills candidatas a aprovar (auto-aprendizagem de procedimentos).
+CREATE TABLE IF NOT EXISTS pending_skills (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

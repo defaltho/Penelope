@@ -61,6 +61,15 @@ export const editFact = (id: number, text: string) =>
 export const deleteFact = (id: number) =>
 	fetch(`/api/memory/facts/${id}`, { method: 'DELETE' }).then(json);
 
+export const exportFacts = () =>
+	fetch('/api/memory/export').then(json<{ text: string; fact_type: string }[]>);
+export const importFacts = (facts: { text: string; fact_type?: string }[]) =>
+	fetch('/api/memory/import', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ facts })
+	}).then(json<{ added: number }>);
+
 // ---- Pesquisa global ----
 
 export interface SearchHit {
@@ -82,7 +91,43 @@ export interface AppSettings {
 	dispatch_url: string;
 	memory_enabled: boolean;
 	skills_enabled: boolean;
+	memory_review: boolean;
+	skills_auto: boolean;
+	temperature: number;
+	num_ctx: number;
+	max_tokens: number;
+	system_extra: string;
+	internet_enabled: boolean;
+	user_name: string;
+	onboarded: boolean;
+	ui_anim: boolean;
+	ui_welcome: boolean;
+	ui_thinking: boolean;
+	ui_text_emojis: boolean;
 }
+
+export const exportData = () => fetch('/api/data/export').then(json<unknown>);
+export const importData = (data: unknown) =>
+	fetch('/api/data/import', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(data)
+	}).then(json<{ added: Record<string, number> }>);
+export const wipeData = (target: string) =>
+	fetch(`/api/data/wipe/${target}`, { method: 'POST' }).then(json<{ wiped: string }>);
+
+export interface PendingFact {
+	id: number;
+	text: string;
+	fact_type: string;
+	created_at: string;
+}
+
+export const listPending = () => fetch('/api/memory/pending').then(json<PendingFact[]>);
+export const approvePending = (id: number) =>
+	fetch(`/api/memory/pending/${id}/approve`, { method: 'POST' }).then(json);
+export const rejectPending = (id: number) =>
+	fetch(`/api/memory/pending/${id}`, { method: 'DELETE' }).then(json);
 
 export const getSettings = () => fetch('/api/settings').then(json<AppSettings>);
 export const putSettings = (patch: Partial<AppSettings>) =>
@@ -109,6 +154,22 @@ export const compare = (prompt: string, modelA: string, modelB: string) =>
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ prompt, model_a: modelA, model_b: modelB })
 	}).then(json<{ left: CompareSide; right: CompareSide }>);
+
+// ---- Agents ----
+
+export interface AgentStep {
+	thought: string;
+	tool: string | null;
+	args: Record<string, unknown>;
+	observation: string | null;
+}
+
+export const agentRun = (task: string) =>
+	fetch('/api/agent/run', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ task })
+	}).then(json<{ steps: AgentStep[]; final: string }>);
 
 // ---- Notas ----
 
@@ -224,6 +285,29 @@ export const updateSkill = (
 
 export const deleteSkill = (id: number) =>
 	fetch(`/api/skills/${id}`, { method: 'DELETE' }).then(json);
+
+export interface PendingSkill {
+	id: number;
+	name: string;
+	instruction: string;
+	created_at: string;
+}
+
+export const listPendingSkills = () =>
+	fetch('/api/skills/pending').then(json<PendingSkill[]>);
+export const approvePendingSkill = (id: number) =>
+	fetch(`/api/skills/pending/${id}/approve`, { method: 'POST' }).then(json);
+export const rejectPendingSkill = (id: number) =>
+	fetch(`/api/skills/pending/${id}`, { method: 'DELETE' }).then(json);
+
+export const exportSkills = () =>
+	fetch('/api/skills/export').then(json<Skill[]>);
+export const importSkills = (skills: { name: string; instruction: string; enabled?: boolean }[]) =>
+	fetch('/api/skills/import', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ skills })
+	}).then(json<{ added: number }>);
 
 // ---- Galeria ----
 

@@ -30,7 +30,14 @@ import ollama_client as oc
 from config import settings
 from db import connect, fts5_available, init_schema
 from memory import MemoryService
-from schemas import ChatRequest, PipelineExtractRequest, TransactionExtraction
+from schemas import (
+    AgentRunRequest,
+    AgentStep,
+    ChatRequest,
+    PipelineExtractRequest,
+    SkillExtraction,
+    TransactionExtraction,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("penelope")
@@ -125,28 +132,49 @@ async def chat(req: ChatRequest):
     # Preparar imagem (decode + resize) e persistir em disco, se houver.
     img_b64: str | None = None
     image_path: str | None = None
-    if has_image:
+    if has_image and not req.incognito:
         raw = _decode_image(req.image_base64)
         jpeg = _resize_to_jpeg_bytes(raw, settings.vision_max_dim)
         img_b64 = base64.b64encode(jpeg).decode("ascii")
         image_path = _save_image(jpeg)
+    elif has_image:
+        # Anónimo: a imagem é vista pelo modelo mas NÃO é gravada em disco.
+        raw = _decode_image(req.image_base64)
+        jpeg = _resize_to_jpeg_bytes(raw, settings.vision_max_dim)
+        img_b64 = base64.b64encode(jpeg).decode("ascii")
 
-    conversation_id = _ensure_conversation(conn, req.conversation_id)
-
-    # Persistir mensagem do utilizador (FTS sincroniza via trigger)
-    conn.execute(
-        "INSERT INTO messages (conversation_id, role, content, image_path) VALUES (?, 'user', ?, ?)",
-        (conversation_id, user_text, image_path),
-    )
-    conn.commit()
+    if req.incognito:
+        # MODO ANÓNIMO: nada é persistido (sem conversa, sem mensagens).
+        conversation_id = None
+    else:
+        conversation_id = _ensure_conversation(conn, req.conversation_id)
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, image_path) VALUES (?, 'user', ?, ?)",
+            (conversation_id, user_text, image_path),
+        )
+        conn.commit()
 
     cfg = _get_settings(conn)
     chat_model = (req.model or "").strip() or cfg["chat_model"]
 
-    system_content = settings.base_system_prompt
+    # Parâmetros de geração das definições (com fallbacks seguros)
+    def _num(key, default, cast):
+        try:
+            return cast(cfg.get(key) or default)
+        except (TypeError, ValueError):
+            return default
 
-    # Recuperar + injetar memória (se ativa nas definições)
-    if cfg["memory_enabled"] == "1":
+    temperature = _num("temperature", settings.chat_temperature, float)
+    num_ctx = _num("num_ctx", settings.num_ctx, int)
+    max_tokens = _num("max_tokens", 0, int)
+
+    system_content = settings.base_system_prompt
+    system_extra = (cfg.get("system_extra") or "").strip()
+    if system_extra:
+        system_content += "\n\n" + system_extra
+
+    # Recuperar + injetar memória (se ativa E não em modo anónimo)
+    if cfg["memory_enabled"] == "1" and not req.incognito:
         injection = await memory.retrieve(user_text)
         if injection:
             system_content += "\n\n" + injection
@@ -160,7 +188,11 @@ async def chat(req: ChatRequest):
             block = "\n\n".join(f"[{s['name']}]\n{s['instruction']}" for s in skill_rows)
             system_content += "\n\nInstruções ativas (segue-as):\n" + block
 
-    history = _recent_history(conn, conversation_id, settings.recent_history_turns)
+    # Histórico: anónimo não lê nada do disco (só a mensagem atual).
+    if req.incognito:
+        history = [{"role": "user", "content": user_text}]
+    else:
+        history = _recent_history(conn, conversation_id, settings.recent_history_turns)
     messages = [{"role": "system", "content": system_content}, *history]
 
     # Anexar a imagem ao último turno do utilizador (só neste pedido).
@@ -171,12 +203,23 @@ async def chat(req: ChatRequest):
 
     async def event_gen():
         try:
-            async for token in oc.chat_stream(messages, model=chat_model):
+            async for token in oc.chat_stream(
+                messages,
+                model=chat_model,
+                num_ctx=num_ctx,
+                temperature=temperature,
+                num_predict=(max_tokens or None),
+            ):
                 holder["text"] += token
                 yield {"event": "token", "data": json.dumps({"token": token})}
         except oc.OllamaError as e:
             log.error("erro de chat: %s", e)
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            return
+
+        # MODO ANÓNIMO: não grava nada; termina o stream sem persistir.
+        if req.incognito:
+            yield {"event": "done", "data": json.dumps({"conversation_id": None, "incognito": True})}
             return
 
         # Persistir resposta do assistente
@@ -205,7 +248,12 @@ async def chat(req: ChatRequest):
 
     async def _post_exchange():
         # Corre depois da resposta ser enviada; nunca bloqueia o stream visível.
+        # MODO ANÓNIMO: nada de memória nem auto-skills.
+        if req.incognito:
+            return
         await memory.remember(conversation_id, user_text, holder["text"])
+        if _get_settings(conn)["skills_auto"] == "1":
+            await _auto_skills(conn, user_text, holder["text"])
 
     return EventSourceResponse(event_gen(), background=BackgroundTask(_post_exchange))
 
@@ -399,6 +447,51 @@ async def edit_fact(fact_id: int, body: dict):
     return {"id": fact_id, "text": text}
 
 
+@app.get("/memory/pending")
+async def list_pending():
+    conn = app.state.conn
+    rows = conn.execute(
+        "SELECT id, text, fact_type, created_at FROM pending_facts ORDER BY id DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/memory/pending/{pending_id}/approve")
+async def approve_pending(pending_id: int):
+    memory: MemoryService = app.state.memory
+    ok = await memory.approve_pending(pending_id)
+    if not ok:
+        raise HTTPException(404, f"pendente {pending_id} não existe")
+    return {"approved": pending_id}
+
+
+@app.delete("/memory/pending/{pending_id}")
+async def reject_pending(pending_id: int):
+    memory: MemoryService = app.state.memory
+    if not memory.reject_pending(pending_id):
+        raise HTTPException(404, f"pendente {pending_id} não existe")
+    return {"rejected": pending_id}
+
+
+@app.get("/memory/export")
+async def export_facts():
+    conn = app.state.conn
+    rows = conn.execute(
+        "SELECT text, fact_type FROM semantic_facts WHERE is_deleted = 0 ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/memory/import")
+async def import_facts(body: dict):
+    memory: MemoryService = app.state.memory
+    facts = body.get("facts")
+    if not isinstance(facts, list):
+        raise HTTPException(400, "esperado {facts: [...]}")
+    added = await memory.import_facts(facts)
+    return {"added": added}
+
+
 @app.delete("/memory/facts/{fact_id}")
 async def delete_fact(fact_id: int):
     conn = app.state.conn
@@ -406,6 +499,128 @@ async def delete_fact(fact_id: int):
     conn.execute("DELETE FROM fact_vectors WHERE fact_id = ?", (fact_id,))
     conn.commit()
     return {"deleted": fact_id}
+
+
+# ---------- Agents (loop simples com ferramentas locais seguras) ----------
+
+_AGENT_SYSTEM = (
+    "És um agente que cumpre a tarefa do utilizador usando ferramentas LOCAIS. "
+    "Ferramentas:\n"
+    "- data_hora(): data e hora atuais.\n"
+    "- pesquisar_memoria(query): procura factos guardados sobre o utilizador.\n"
+    "- criar_nota(titulo, conteudo): cria uma nota.\n"
+    "- criar_tarefa(texto): adiciona uma tarefa.\n"
+    "- listar_tarefas(): lista as tarefas.\n"
+    "- abrir_pagina(url): lê o texto de uma página web (SÓ funciona se a internet "
+    "estiver ativada nas Definições; por defeito está desligada).\n\n"
+    "A cada passo devolve JSON. Para usar uma ferramenta: {thought, tool, args}. "
+    "Quando a tarefa estiver concluída: {thought, final: <resposta ao utilizador>}. "
+    "Usa o mínimo de passos possível e não inventes resultados de ferramentas."
+)
+
+
+async def _agent_tool(conn, memory, name: str, args: dict) -> str:
+    name = (name or "").strip()
+    args = args or {}
+    if name == "data_hora":
+        import datetime
+        return datetime.datetime.now().strftime("Agora: %Y-%m-%d %H:%M")
+    if name == "pesquisar_memoria":
+        q = str(args.get("query") or args.get("consulta") or "").strip()
+        if not q:
+            return "erro: falta 'query'"
+        rows = await memory.search_facts(q, 5)
+        return ("Factos: " + " | ".join(r["text"] for r in rows)) if rows else "sem factos relevantes"
+    if name == "criar_nota":
+        title = str(args.get("titulo") or args.get("title") or "").strip()
+        content = str(args.get("conteudo") or args.get("content") or "").strip()
+        if not title and not content:
+            return "erro: nota vazia"
+        conn.execute("INSERT INTO notes (title, content) VALUES (?, ?)", (title[:120], content))
+        conn.commit()
+        return f"nota criada: {title or '(sem título)'}"
+    if name == "criar_tarefa":
+        text = str(args.get("texto") or args.get("text") or "").strip()
+        if not text:
+            return "erro: tarefa vazia"
+        conn.execute("INSERT INTO tasks (text) VALUES (?)", (text,))
+        conn.commit()
+        return f"tarefa criada: {text}"
+    if name == "listar_tarefas":
+        rows = conn.execute(
+            "SELECT text, done FROM tasks ORDER BY done, id DESC LIMIT 20"
+        ).fetchall()
+        if not rows:
+            return "sem tarefas"
+        return "Tarefas: " + " | ".join(
+            ("[x] " if r["done"] else "[ ] ") + r["text"] for r in rows
+        )
+    if name == "abrir_pagina":
+        # GATED: só com internet explicitamente ativada (fail-closed).
+        if not _internet_allowed(conn):
+            return "BLOQUEADO: acesso à internet desligado. Ativa-o nas Definições para usar a web."
+        url = str(args.get("url") or "").strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return "erro: url tem de começar por http:// ou https://"
+        low = url.lower()
+        if any(h in low for h in ("localhost", "127.0.0.1", "0.0.0.0", "::1", "192.168.", "169.254.", "/10.")):
+            return "BLOQUEADO: endereços locais/privados não são permitidos."
+        try:
+            import httpx
+            import re as _re2
+
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                r = await c.get(url, headers={"User-Agent": "Penelope/1.0"})
+            txt = _re2.sub(r"<[^>]+>", " ", r.text)
+            txt = _re2.sub(r"\s+", " ", txt).strip()
+            return f"Conteúdo de {url} (truncado): {txt[:1500]}"
+        except Exception as e:  # noqa: BLE001
+            return f"erro ao abrir página: {e}"
+    return f"erro: ferramenta desconhecida '{name}'"
+
+
+@app.post("/agent/run")
+async def agent_run(req: AgentRunRequest):
+    conn = app.state.conn
+    memory: MemoryService = app.state.memory
+    task = req.task.strip()
+    if not task:
+        raise HTTPException(400, "tarefa vazia")
+
+    convo = [f"Tarefa: {task}"]
+    steps: list[dict] = []
+    final: str | None = None
+    MAX_STEPS = 5
+
+    for _ in range(MAX_STEPS):
+        messages = [
+            {"role": "system", "content": _AGENT_SYSTEM},
+            {"role": "user", "content": "\n".join(convo) + "\n\nDecide o próximo passo (JSON)."},
+        ]
+        try:
+            raw = await oc.extract_json(messages, schema=AgentStep.model_json_schema())
+            step = AgentStep.model_validate(raw)
+        except Exception as e:  # noqa: BLE001
+            final = f"(o agente falhou a decidir: {e})"
+            break
+
+        if step.final:
+            steps.append({"thought": step.thought, "tool": None, "args": {}, "observation": None})
+            final = step.final
+            break
+        if not step.tool:
+            final = step.thought or "(sem ação)"
+            break
+
+        obs = await _agent_tool(conn, memory, step.tool, step.args or {})
+        steps.append(
+            {"thought": step.thought, "tool": step.tool, "args": step.args or {}, "observation": obs}
+        )
+        convo.append(f"Ação: {step.tool}({step.args or {}}) -> {obs}")
+
+    if final is None:
+        final = "(atingi o limite de passos sem concluir a tarefa)"
+    return {"steps": steps, "final": final}
 
 
 # ---------- Pipeline de estruturação (Stage 3) ----------
@@ -470,7 +685,10 @@ async def pipeline_dispatch(tx: TransactionExtraction):
     dispatch_url = _get_settings(conn)["dispatch_url"]
     dispatched = False
     detail = "guardado localmente (sem endpoint de destino configurado)"
-    if dispatch_url:
+    # GATE DE INTERNET (fail-closed): nenhuma saída sem o utilizador ligar a internet.
+    if dispatch_url and not _internet_allowed(conn):
+        detail = "guardado localmente (acesso à internet desligado — ativa-o nas Definições)"
+    elif dispatch_url:
         try:
             import httpx
 
@@ -542,6 +760,128 @@ async def update_skill(skill_id: int, body: dict):
     return {"id": skill_id}
 
 
+_SKILL_EXTRACT_SYSTEM = (
+    "Detetas INSTRUÇÕES REUTILIZÁVEIS que o utilizador queira que o assistente siga "
+    "SEMPRE dali em diante (persona, tom, formato, regras de comportamento) — por ex.: "
+    "'responde sempre em português', 'usa sempre tom formal', 'mostra o código em blocos'. "
+    "NÃO incluas pedidos pontuais nem factos sobre o utilizador. Para cada uma, dá um nome "
+    "curto e a instrução. Se não houver nenhuma instrução durável, devolve lista vazia."
+)
+
+
+async def _auto_skills(conn, user_text: str, assistant_text: str) -> None:
+    """Propõe skills (instruções duráveis) a partir da troca, para a fila de aprovação."""
+    messages = [
+        {"role": "system", "content": _SKILL_EXTRACT_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"Utilizador: {user_text}\nAssistente: {assistant_text}\n\n"
+                "Deteta skills reutilizáveis."
+            ),
+        },
+    ]
+    try:
+        raw = await oc.extract_json(messages, schema=SkillExtraction.model_json_schema())
+        result = SkillExtraction.model_validate(raw)
+    except Exception as e:  # noqa: BLE001
+        log.warning("auto-skills: extração falhou: %s", e)
+        return
+    if not result.skills:
+        return
+    existing = {
+        (r[0] or "").strip().lower()
+        for r in conn.execute("SELECT name FROM skills").fetchall()
+    }
+    pend = {
+        (r[0] or "").strip().lower()
+        for r in conn.execute("SELECT name FROM pending_skills").fetchall()
+    }
+    for s in result.skills:
+        name = s.name.strip()
+        instr = s.instruction.strip()
+        if not name or not instr or name.lower() in existing or name.lower() in pend:
+            continue
+        conn.execute(
+            "INSERT INTO pending_skills (name, instruction) VALUES (?, ?)",
+            (name[:60], instr),
+        )
+        pend.add(name.lower())
+    conn.commit()
+
+
+@app.get("/skills/pending")
+async def list_pending_skills():
+    conn = app.state.conn
+    rows = conn.execute(
+        "SELECT id, name, instruction, created_at FROM pending_skills ORDER BY id DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/skills/pending/{pending_id}/approve")
+async def approve_pending_skill(pending_id: int):
+    conn = app.state.conn
+    row = conn.execute(
+        "SELECT name, instruction FROM pending_skills WHERE id = ?", (pending_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, f"skill pendente {pending_id} não existe")
+    conn.execute(
+        "INSERT INTO skills (name, instruction, enabled) VALUES (?, ?, 1)",
+        (row["name"], row["instruction"]),
+    )
+    conn.execute("DELETE FROM pending_skills WHERE id = ?", (pending_id,))
+    conn.commit()
+    return {"approved": pending_id}
+
+
+@app.delete("/skills/pending/{pending_id}")
+async def reject_pending_skill(pending_id: int):
+    conn = app.state.conn
+    cur = conn.execute("DELETE FROM pending_skills WHERE id = ?", (pending_id,))
+    conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(404, f"skill pendente {pending_id} não existe")
+    return {"rejected": pending_id}
+
+
+@app.get("/skills/export")
+async def export_skills():
+    conn = app.state.conn
+    rows = conn.execute(
+        "SELECT name, instruction, enabled FROM skills ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/skills/import")
+async def import_skills(body: dict):
+    conn = app.state.conn
+    skills = body.get("skills")
+    if not isinstance(skills, list):
+        raise HTTPException(400, "esperado {skills: [...]}")
+    existing = {
+        (r[0] or "").strip()
+        for r in conn.execute("SELECT name FROM skills").fetchall()
+    }
+    added = 0
+    for s in skills:
+        name = (s.get("name") or "").strip()
+        instruction = (s.get("instruction") or "").strip()
+        if not name or not instruction or name in existing:
+            continue
+        enabled = 1 if s.get("enabled", True) else 0
+        conn.execute(
+            "INSERT INTO skills (name, instruction, enabled) VALUES (?, ?, ?)",
+            (name[:60], instruction, enabled),
+        )
+        existing.add(name)
+        added += 1
+    conn.commit()
+    return {"added": added}
+
+
 @app.delete("/skills/{skill_id}")
 async def delete_skill(skill_id: int):
     conn = app.state.conn
@@ -596,31 +936,116 @@ def _get_settings(conn) -> dict:
         "dispatch_url": settings.dispatch_url,
         "memory_enabled": "1",
         "skills_enabled": "1",
+        "memory_review": "0",
+        "skills_auto": "0",
+        "temperature": str(settings.chat_temperature),
+        "num_ctx": str(settings.num_ctx),
+        "max_tokens": "0",  # 0 = sem limite (default do modelo)
+        "system_extra": "",
+        # SEGURANÇA: acesso à internet DESLIGADO por defeito. Só "1" quando o
+        # utilizador o ativa explicitamente nas Definições.
+        "internet_enabled": "0",
+        # Perfil / onboarding (single-user local)
+        "user_name": "",
+        "onboarded": "0",
+        # Aparência
+        "ui_anim": "1",
+        "ui_welcome": "1",
+        "ui_thinking": "0",
+        "ui_text_emojis": "0",
     }
     for r in conn.execute("SELECT key, value FROM app_settings").fetchall():
         out[r["key"]] = r["value"]
     return out
 
 
+_BOOL_KEYS = {
+    "memory_enabled",
+    "skills_enabled",
+    "memory_review",
+    "skills_auto",
+    "internet_enabled",
+    "onboarded",
+    "ui_anim",
+    "ui_welcome",
+    "ui_thinking",
+    "ui_text_emojis",
+}
+
+
+def _internet_allowed(conn) -> bool:
+    """Gate único e fail-closed de acesso à internet. Desligado por defeito."""
+    return _get_settings(conn)["internet_enabled"] == "1"
+
+
 @app.get("/settings")
 async def get_settings():
     s = _get_settings(app.state.conn)
+
+    def _f(key, default):
+        try:
+            return float(s.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _i(key, default):
+        try:
+            return int(float(s.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+
     return {
         "chat_model": s["chat_model"],
         "dispatch_url": s["dispatch_url"],
         "memory_enabled": s["memory_enabled"] == "1",
         "skills_enabled": s["skills_enabled"] == "1",
+        "memory_review": s["memory_review"] == "1",
+        "skills_auto": s["skills_auto"] == "1",
+        "temperature": _f("temperature", 0.7),
+        "num_ctx": _i("num_ctx", 8192),
+        "max_tokens": _i("max_tokens", 0),
+        "system_extra": s["system_extra"],
+        "internet_enabled": s["internet_enabled"] == "1",
+        "user_name": s["user_name"],
+        "onboarded": s["onboarded"] == "1",
+        "ui_anim": s["ui_anim"] == "1",
+        "ui_welcome": s["ui_welcome"] == "1",
+        "ui_thinking": s["ui_thinking"] == "1",
+        "ui_text_emojis": s["ui_text_emojis"] == "1",
     }
 
 
 @app.put("/settings")
 async def put_settings(body: dict):
     conn = app.state.conn
-    allowed = {"chat_model", "dispatch_url", "memory_enabled", "skills_enabled"}
+    allowed = {
+        "chat_model",
+        "dispatch_url",
+        "system_extra",
+        "temperature",
+        "num_ctx",
+        "max_tokens",
+        "user_name",
+    } | _BOOL_KEYS
     for key in allowed & body.keys():
         val = body[key]
-        if key in ("memory_enabled", "skills_enabled"):
+        if key in _BOOL_KEYS:
             val = "1" if val else "0"
+        elif key == "temperature":
+            try:
+                val = min(2.0, max(0.0, float(val)))
+            except (TypeError, ValueError):
+                continue
+        elif key == "num_ctx":
+            try:
+                val = min(32768, max(512, int(float(val))))
+            except (TypeError, ValueError):
+                continue
+        elif key == "max_tokens":
+            try:
+                val = min(8192, max(0, int(float(val))))
+            except (TypeError, ValueError):
+                continue
         conn.execute(
             "INSERT INTO app_settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -777,6 +1202,109 @@ async def delete_task(task_id: int):
     if cur.rowcount == 0:
         raise HTTPException(404, f"tarefa {task_id} não existe")
     return {"deleted": task_id}
+
+
+# ---------- Dados (backup + danger zone) ----------
+
+@app.get("/data/export")
+async def data_export():
+    conn = app.state.conn
+    facts = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT text, fact_type FROM semantic_facts WHERE is_deleted = 0"
+        ).fetchall()
+    ]
+    skills = [
+        dict(r)
+        for r in conn.execute("SELECT name, instruction, enabled FROM skills").fetchall()
+    ]
+    notes = [
+        dict(r)
+        for r in conn.execute("SELECT title, content, pinned FROM notes").fetchall()
+    ]
+    tasks = [dict(r) for r in conn.execute("SELECT text, done FROM tasks").fetchall()]
+    return {"facts": facts, "skills": skills, "notes": notes, "tasks": tasks}
+
+
+@app.post("/data/import")
+async def data_import(body: dict):
+    conn = app.state.conn
+    memory: MemoryService = app.state.memory
+    added = {"facts": 0, "skills": 0, "notes": 0, "tasks": 0}
+    if isinstance(body.get("facts"), list):
+        added["facts"] = await memory.import_facts(body["facts"])
+    if isinstance(body.get("skills"), list):
+        existing = {(r[0] or "").strip() for r in conn.execute("SELECT name FROM skills").fetchall()}
+        for s in body["skills"]:
+            name = (s.get("name") or "").strip()
+            instr = (s.get("instruction") or "").strip()
+            if not name or not instr or name in existing:
+                continue
+            conn.execute(
+                "INSERT INTO skills (name, instruction, enabled) VALUES (?, ?, ?)",
+                (name[:60], instr, 1 if s.get("enabled", True) else 0),
+            )
+            existing.add(name)
+            added["skills"] += 1
+    if isinstance(body.get("notes"), list):
+        for n in body["notes"]:
+            title = (n.get("title") or "").strip()
+            content = (n.get("content") or "").strip()
+            if not title and not content:
+                continue
+            conn.execute(
+                "INSERT INTO notes (title, content, pinned) VALUES (?, ?, ?)",
+                (title[:120], content, 1 if n.get("pinned") else 0),
+            )
+            added["notes"] += 1
+    if isinstance(body.get("tasks"), list):
+        for t in body["tasks"]:
+            text = (t.get("text") or "").strip()
+            if not text:
+                continue
+            conn.execute(
+                "INSERT INTO tasks (text, done) VALUES (?, ?)",
+                (text, 1 if t.get("done") else 0),
+            )
+            added["tasks"] += 1
+    conn.commit()
+    return {"added": added}
+
+
+@app.post("/data/wipe/{target}")
+async def data_wipe(target: str):
+    conn = app.state.conn
+    if target == "chats":
+        conn.execute("DELETE FROM turn_vectors")
+        conn.execute("DELETE FROM turns")
+        conn.execute("DELETE FROM messages")
+        conn.execute("DELETE FROM conversations")
+    elif target == "memory":
+        conn.execute("UPDATE semantic_facts SET is_deleted = 1")
+        conn.execute("DELETE FROM fact_vectors")
+        conn.execute("DELETE FROM pending_facts")
+    elif target == "skills":
+        conn.execute("DELETE FROM skills")
+        conn.execute("DELETE FROM pending_skills")
+    elif target == "notes":
+        conn.execute("DELETE FROM notes")
+    elif target == "tasks":
+        conn.execute("DELETE FROM tasks")
+    elif target == "gallery":
+        # apagar ficheiros em disco + limpar referências
+        try:
+            for fn in os.listdir(settings.images_dir):
+                fp = os.path.join(settings.images_dir, fn)
+                if os.path.isfile(fp):
+                    os.remove(fp)
+        except OSError as e:
+            log.warning("wipe gallery: %s", e)
+        conn.execute("UPDATE messages SET image_path = NULL WHERE image_path IS NOT NULL")
+    else:
+        raise HTTPException(400, f"alvo desconhecido: {target}")
+    conn.commit()
+    return {"wiped": target}
 
 
 @app.get("/health")

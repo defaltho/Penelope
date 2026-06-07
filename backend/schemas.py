@@ -31,6 +31,30 @@ class ExtractionResult(BaseModel):
     facts: list[ExtractedFact] = Field(default_factory=list)
 
 
+# --- Auto-aprendizagem de skills ---
+
+class SkillSuggestion(BaseModel):
+    name: str = Field(description="Nome curto da skill (ex.: 'Tom formal').")
+    instruction: str = Field(description="Instrução reutilizável a seguir sempre.")
+
+
+class SkillExtraction(BaseModel):
+    skills: list[SkillSuggestion] = Field(default_factory=list)
+
+
+# --- Agents (loop simples com ferramentas locais) ---
+
+class AgentStep(BaseModel):
+    thought: str = Field(default="", description="Raciocínio curto sobre o próximo passo.")
+    tool: str | None = Field(default=None, description="Ferramenta a usar, ou null se terminou.")
+    args: dict = Field(default_factory=dict, description="Argumentos da ferramenta.")
+    final: str | None = Field(default=None, description="Resposta final ao utilizador (quando terminado).")
+
+
+class AgentRunRequest(BaseModel):
+    task: str
+
+
 # --- Consolidação (Camada A, passo 2) ---
 
 class Operation(str, Enum):
@@ -88,6 +112,7 @@ class ChatRequest(BaseModel):
         description="Imagem opcional (data URL ou base64 cru) para chat multimodal/visão.",
     )
     model: str | None = Field(default=None, description="Modelo a usar; default = definições.")
+    incognito: bool = Field(default=False, description="Modo anónimo: nada é guardado nem memorizado.")
 
 
 class ConversationOut(BaseModel):

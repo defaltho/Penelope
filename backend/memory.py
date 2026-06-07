@@ -24,6 +24,7 @@ from schemas import (
     ConsolidationDecision,
     ExtractedFact,
     ExtractionResult,
+    FactType,
     Operation,
 )
 
@@ -260,6 +261,44 @@ class MemoryService:
         vec = await oc.embed(query, kind="query")
         return self._knn_facts(vec, k)
 
+    async def import_facts(self, facts: list[dict]) -> int:
+        """Importa factos manualmente (texto + fact_type). Embebe cada um e
+        insere, mantendo o lockstep. Ignora vazios e duplicados exatos."""
+        existing = {
+            (r[0] or "").strip()
+            for r in self.conn.execute(
+                "SELECT text FROM semantic_facts WHERE is_deleted = 0"
+            ).fetchall()
+        }
+        allowed = {"preference", "profile", "financial", "language", "other"}
+        added = 0
+        for f in facts:
+            # Aceita o nosso formato (text/fact_type) e o do Odysseus (text/category).
+            text = (f.get("text") or f.get("content") or "").strip()
+            if not text or text in existing:
+                continue
+            ftype = (f.get("fact_type") or f.get("category") or "other").strip().lower()
+            if ftype not in allowed:
+                ftype = "other"
+            try:
+                vec = await oc.embed(text, kind="query")
+            except oc.OllamaError as e:
+                log.warning("import: embed falhou, a saltar: %s", e)
+                continue
+            async with self._write_lock:
+                cur = self.conn.execute(
+                    "INSERT INTO semantic_facts (text, fact_type) VALUES (?, ?)",
+                    (text, ftype),
+                )
+                self.conn.execute(
+                    "INSERT INTO fact_vectors (fact_id, embedding) VALUES (?, ?)",
+                    (cur.lastrowid, _serialize(vec)),
+                )
+                self.conn.commit()
+            existing.add(text)
+            added += 1
+        return added
+
     async def edit_fact(self, fact_id: int, new_text: str) -> bool:
         """Edita o texto de um facto e re-embebe (delete+insert do vetor).
 
@@ -310,13 +349,75 @@ class MemoryService:
             parts.extend(f"- {r['text']}" for r in turns)
         return "\n".join(parts)
 
+    # ---------- Factos pendentes (modo de revisão) ----------
+
+    def _review_enabled(self) -> bool:
+        row = self.conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'memory_review'"
+        ).fetchone()
+        return bool(row) and row[0] == "1"
+
+    def add_pending(self, facts: list[ExtractedFact], source_turn: int | None) -> int:
+        """Coloca candidatos na fila de revisão (sem embeber ainda). Ignora
+        duplicados exatos face aos factos ativos e aos já pendentes."""
+        active = {
+            (r[0] or "").strip()
+            for r in self.conn.execute(
+                "SELECT text FROM semantic_facts WHERE is_deleted = 0"
+            ).fetchall()
+        }
+        pend = {
+            (r[0] or "").strip()
+            for r in self.conn.execute("SELECT text FROM pending_facts").fetchall()
+        }
+        added = 0
+        for f in facts:
+            t = f.text.strip()
+            if not t or t in active or t in pend:
+                continue
+            self.conn.execute(
+                "INSERT INTO pending_facts (text, fact_type, source_turn) VALUES (?, ?, ?)",
+                (t, f.fact_type.value, source_turn),
+            )
+            pend.add(t)
+            added += 1
+        self.conn.commit()
+        return added
+
+    async def approve_pending(self, pending_id: int) -> bool:
+        """Aprova um candidato: corre a consolidação real e remove da fila."""
+        row = self.conn.execute(
+            "SELECT text, fact_type, source_turn FROM pending_facts WHERE id = ?",
+            (pending_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            ftype = FactType(row["fact_type"])
+        except ValueError:
+            ftype = FactType.other
+        fact = ExtractedFact(text=row["text"], fact_type=ftype)
+        await self.consolidate([fact], row["source_turn"])
+        self.conn.execute("DELETE FROM pending_facts WHERE id = ?", (pending_id,))
+        self.conn.commit()
+        return True
+
+    def reject_pending(self, pending_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM pending_facts WHERE id = ?", (pending_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     # ---------- Orquestrador pós-troca (background) ----------
 
     async def remember(self, conversation_id: int, user_text: str, assistant_text: str) -> None:
         try:
             turn_id = await self.store_turn(conversation_id, user_text, assistant_text)
             facts = await self.extract(user_text, assistant_text)
-            if facts:
-                await self.consolidate(facts, turn_id)
+            if not facts:
+                return
+            if self._review_enabled():
+                self.add_pending(facts, turn_id)  # fica para aprovação
+            else:
+                await self.consolidate(facts, turn_id)  # auto-grava (como antes)
         except Exception as e:  # noqa: BLE001 - nunca rebentar o caminho de chat
             log.error("remember falhou: %s", e)

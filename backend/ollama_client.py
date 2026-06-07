@@ -46,17 +46,21 @@ async def chat_stream(
     model: str | None = None,
     num_ctx: int | None = None,
     temperature: float | None = None,
+    num_predict: int | None = None,
 ) -> AsyncIterator[str]:
     """Faz stream da resposta do assistente, token a token, via /api/chat."""
+    options = {
+        "num_ctx": num_ctx or settings.num_ctx,
+        "temperature": settings.chat_temperature if temperature is None else temperature,
+    }
+    if num_predict:  # 0/None = sem limite (default do modelo)
+        options["num_predict"] = num_predict
     try:
         stream = await _client().chat(
             model=model or settings.chat_model,
             messages=messages,
             stream=True,
-            options={
-                "num_ctx": num_ctx or settings.num_ctx,
-                "temperature": settings.chat_temperature if temperature is None else temperature,
-            },
+            options=options,
         )
         async for chunk in stream:
             piece = chunk.get("message", {}).get("content", "")

@@ -35,6 +35,20 @@
 	let selectedModel = $state('');
 	let modelMenuOpen = $state(false);
 	let openMenu = $state<number | null>(null);
+	let incognito = $state(false);
+	let plusMenuOpen = $state(false);
+	let uiWelcome = $state(true);
+	let uiThinking = $state(false);
+	let uiTextEmojis = $state(false);
+
+	const EMOJI_RE =
+		/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}]/gu;
+	function displayContent(c: string): string {
+		let out = c;
+		if (!uiThinking) out = out.replace(/<think>[\s\S]*?<\/think>/gi, '').trimStart();
+		if (uiTextEmojis) out = out.replace(EMOJI_RE, '').replace(/\s{2,}/g, ' ');
+		return out;
+	}
 
 	let scroller: HTMLDivElement;
 	let textarea: HTMLTextAreaElement;
@@ -74,6 +88,9 @@
 			]);
 			models = mdls;
 			selectedModel = settings.chat_model || mdls[0] || '';
+			uiWelcome = settings.ui_welcome;
+			uiThinking = settings.ui_thinking;
+			uiTextEmojis = settings.ui_text_emojis;
 		} catch (e) {
 			console.error('falha a obter modelos', e);
 		}
@@ -150,11 +167,14 @@
 					scrollToBottom();
 				},
 				onDone: (id) => {
-					conversationId = id;
 					streaming = false;
 					const secs = startedAt ? (performance.now() - startedAt) / 1000 : 0;
 					if (secs > 0 && tokens > 1) messages[idx].tokPerSec = tokens / secs;
-					onConversationsChanged();
+					// Anónimo: id vem null; não fixa conversa nem refresca a sidebar.
+					if (id != null) {
+						conversationId = id;
+						onConversationsChanged();
+					}
 				},
 				onError: (msg) => {
 					errorMsg = msg;
@@ -163,7 +183,8 @@
 				}
 			},
 			image,
-			selectedModel
+			selectedModel,
+			incognito
 		);
 	}
 
@@ -216,11 +237,22 @@
 <div class="chat-area">
 	<div class="scroller" bind:this={scroller}>
 		<div class="thread">
-			{#if !hasMessages}
+			{#if !hasMessages && uiWelcome}
 				<div class="welcome-screen">
 					<div class="wmark"><span class="dot"></span></div>
 					<h1>penelope<span class="caret"></span></h1>
-					<p>assistente local. lembro-me do que importa.</p>
+					<p>
+						{incognito ? 'modo anónimo: nada será guardado.' : 'assistente local. lembro-me do que importa.'}
+					</p>
+					<button
+						class="incognito-pill"
+						class:on={incognito}
+						onclick={() => (incognito = !incognito)}
+						title={incognito ? 'Anónimo ligado' : 'Ligar modo anónimo'}
+					>
+						<Icon name={incognito ? 'eye-off' : 'eye'} size={14} />
+						{incognito ? 'anónimo' : 'normal'}
+					</button>
 				</div>
 			{/if}
 
@@ -234,7 +266,7 @@
 					</div>
 					<div class="body">
 						{#if m.image}<img class="msg-image" src={m.image} alt="imagem anexada" />{/if}
-						{#if m.content}{m.content}{:else if streaming && i === messages.length - 1}<span
+						{#if m.content}{m.role === 'assistant' ? displayContent(m.content) : m.content}{:else if streaming && i === messages.length - 1}<span
 								class="dots"><span></span><span></span><span></span></span
 							>{/if}
 					</div>
@@ -295,9 +327,22 @@
 			{/if}
 			<div class="input-row">
 				<input bind:this={fileInput} type="file" accept="image/*" onchange={onPickFile} hidden />
+					{#if plusMenuOpen}
+						<div class="plus-menu">
+							<button onclick={() => { plusMenuOpen = false; fileInput.click(); }}>
+								<Icon name="paperclip" size={14} /> Anexar imagem
+							</button>
+							<button onclick={() => { plusMenuOpen = false; input = (input ? input + '\n' : '') + 'Age como um especialista e '; textarea?.focus(); autoGrow(); }}>
+								<Icon name="zap" size={14} /> Prompt
+							</button>
+							<button onclick={() => { plusMenuOpen = false; incognito = !incognito; }}>
+								<Icon name={incognito ? 'eye-off' : 'eye'} size={14} /> {incognito ? 'Sair do anónimo' : 'Modo anónimo'}
+							</button>
+						</div>
+					{/if}
 				<button
 					class="attach-btn"
-					onclick={() => fileInput.click()}
+					onclick={() => (plusMenuOpen = !plusMenuOpen)}
 					disabled={streaming}
 					title="anexar imagem"
 					aria-label="anexar"
@@ -614,6 +659,62 @@
 		display: flex;
 		align-items: flex-end;
 		gap: 6px;
+		position: relative;
+	}
+	.plus-menu {
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 0;
+		z-index: 30;
+		min-width: 184px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		box-shadow: var(--shadow-panel);
+		padding: 5px;
+	}
+	.plus-menu button {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: none;
+		color: var(--fg);
+		font-family: var(--font-ui);
+		font-size: 12.5px;
+		font-weight: 600;
+		padding: 9px 10px;
+		border-radius: 8px;
+		cursor: pointer;
+	}
+	.plus-menu button:hover {
+		background: color-mix(in srgb, var(--fg) 7%, transparent);
+	}
+	.incognito-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		margin-top: 16px;
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-muted);
+		font-family: var(--font-ui);
+		font-size: 12px;
+		padding: 6px 14px;
+		border-radius: 999px;
+		cursor: pointer;
+		transition: color 0.14s, border-color 0.14s, background 0.14s;
+	}
+	.incognito-pill:hover {
+		color: var(--fg);
+		border-color: var(--accent);
+	}
+	.incognito-pill.on {
+		color: var(--accent);
+		border-color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
 	}
 	.attach-btn {
 		flex: none;
