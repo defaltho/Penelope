@@ -11,6 +11,8 @@
 	import NotesView from '$lib/views/NotesView.svelte';
 	import TasksView from '$lib/views/TasksView.svelte';
 	import CompareView from '$lib/views/CompareView.svelte';
+	import DocumentsView from '$lib/views/DocumentsView.svelte';
+	import AdventuresView from '$lib/views/AdventuresView.svelte';
 	import SettingsView from '$lib/views/SettingsView.svelte';
 	import Onboarding from '$lib/components/Onboarding.svelte';
 	import { applyTheme, loadTheme, applyAnimation } from '$lib/theme';
@@ -32,6 +34,7 @@
 	let chatConvoId = $state<number | null>(null); // ligado ao ChatView
 	let openConvoId = $state<number | null>(null); // sinal para abrir
 	let newSignal = $state(0); // sinal para nova conversa
+	let openAdventureId = $state<string | null>(null); // sinal para retomar aventura
 
 	onMount(() => {
 		refreshConversations();
@@ -71,6 +74,14 @@
 		newSignal += 1;
 		activeView = 'chat';
 	}
+	function openAdventure(id: string) {
+		// Reatribuir sempre (mesmo id) para forçar o sinal no ChatView.
+		openAdventureId = null;
+		queueMicrotask(() => {
+			openAdventureId = id;
+			activeView = 'chat';
+		});
+	}
 	async function renameConvo(id: number, title: string) {
 		await renameConversation(id, title);
 		await refreshConversations();
@@ -84,7 +95,7 @@
 </script>
 
 <div class="shell">
-	{#if sidebarOpen}
+	{#if sidebarOpen && activeView !== 'settings'}
 		<NavSidebar
 			{activeView}
 			onSelectView={(v) => (activeView = v)}
@@ -116,8 +127,10 @@
 			<ChatView
 				{openConvoId}
 				{newSignal}
+				{openAdventureId}
 				bind:conversationId={chatConvoId}
 				onConversationsChanged={refreshConversations}
+				onOpenAdventures={() => (activeView = 'adventures')}
 			/>
 		</div>
 
@@ -131,12 +144,16 @@
 			<TasksView />
 		{:else if activeView === 'gallery'}
 			<GalleryPanel inline onOpenConversation={selectConvo} />
+		{:else if activeView === 'documents'}
+			<DocumentsView />
+		{:else if activeView === 'adventures'}
+			<AdventuresView onContinue={openAdventure} />
 		{:else if activeView === 'agents'}
 			<AgentsView />
 		{:else if activeView === 'compare'}
 			<CompareView />
 		{:else if activeView === 'settings'}
-			<SettingsView />
+			<SettingsView onClose={() => (activeView = 'chat')} />
 		{/if}
 	</div>
 </div>

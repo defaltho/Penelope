@@ -55,6 +55,37 @@ class AgentRunRequest(BaseModel):
     task: str
 
 
+# --- Aventura (/aidungeon, estilo AI Dungeon) ---
+
+class AdventureCreate(BaseModel):
+    title: str = Field(default="", description="Título da aventura.")
+    scenario: str = Field(default="", description="Premissa/mundo (Quick Start).")
+    instructions: str = Field(default="", description="AI Instructions extra (opcional).")
+
+
+class AdventureMode(str, Enum):
+    do = "do"               # ação da personagem
+    say = "say"             # fala da personagem
+    story = "story"         # narração escrita pelo jogador
+    continue_ = "continue"  # o MJ avança sem novo input
+
+
+class AdventureTurn(BaseModel):
+    input: str = Field(default="", description="Texto do jogador (vazio em modo continue).")
+    mode: AdventureMode = AdventureMode.do
+
+
+class AdventurePatch(BaseModel):
+    """Edições de contexto/turnos (undo, edit, memory, author's note, story cards)."""
+    title: str | None = None
+    scenario: str | None = None
+    instructions: str | None = None
+    memory: str | None = None
+    authors_note: str | None = None
+    story_cards: list[dict] | None = None
+    turns: list[dict] | None = None
+
+
 # --- Consolidação (Camada A, passo 2) ---
 
 class Operation(str, Enum):
@@ -75,33 +106,6 @@ class ConsolidationDecision(BaseModel):
     )
 
 
-# --- Pipeline de estruturação (Stage 3) ---
-
-class TransactionExtraction(BaseModel):
-    """Transação estruturada extraída de texto ou imagem.
-
-    Contrato anti-alucinação: campos ausentes vêm a null. Confiar em
-    números/datas/totais; comerciante/categoria são menos fiáveis e devem ir em
-    `low_confidence_fields` para confirmação do utilizador.
-    """
-    date: str | None = Field(default=None, description="Data ISO YYYY-MM-DD, ou null.")
-    amount: float | None = Field(default=None, description="Valor total, ou null.")
-    currency: str | None = Field(default=None, description="Código ISO da moeda (EUR, USD...), ou null.")
-    merchant: str | None = Field(default=None, description="Comerciante/origem, ou null.")
-    category: str | None = Field(default=None, description="Categoria (ex.: alimentação), ou null.")
-    account: str | None = Field(default=None, description="Conta/método, ou null.")
-    notes: str | None = Field(default=None, description="Notas, ou null.")
-    confidence: float = Field(default=0.0, description="Confiança global 0.0 a 1.0.")
-    low_confidence_fields: list[str] = Field(
-        default_factory=list, description="Campos a confirmar pelo utilizador."
-    )
-
-
-class PipelineExtractRequest(BaseModel):
-    text: str = ""
-    image_base64: str | None = None
-
-
 # --- API HTTP ---
 
 class ChatRequest(BaseModel):
@@ -113,6 +117,11 @@ class ChatRequest(BaseModel):
     )
     model: str | None = Field(default=None, description="Modelo a usar; default = definições.")
     incognito: bool = Field(default=False, description="Modo anónimo: nada é guardado nem memorizado.")
+    web_search: bool = Field(default=False, description="Pesquisa na web antes de responder (requer internet).")
+    system_override: str | None = Field(
+        default=None,
+        description="System prompt base alternativo (ex.: modo /aidungeon). Memória/skills continuam a poder ser injetadas.",
+    )
 
 
 class ConversationOut(BaseModel):

@@ -47,14 +47,25 @@ async def chat_stream(
     num_ctx: int | None = None,
     temperature: float | None = None,
     num_predict: int | None = None,
+    repeat_penalty: float | None = None,
+    min_p: float | None = None,
 ) -> AsyncIterator[str]:
-    """Faz stream da resposta do assistente, token a token, via /api/chat."""
+    """Faz stream da resposta do assistente, token a token, via /api/chat.
+
+    `repeat_penalty`/`min_p` só são enviados quando definidos (usados pelo modo
+    /aidungeon com o sampler oficial do Harbinger-24B). O formato do prompt (ex.:
+    ChatML do Harbinger) é tratado pelo template embebido no modelo, não aqui.
+    """
     options = {
         "num_ctx": num_ctx or settings.num_ctx,
         "temperature": settings.chat_temperature if temperature is None else temperature,
     }
     if num_predict:  # 0/None = sem limite (default do modelo)
         options["num_predict"] = num_predict
+    if repeat_penalty is not None:
+        options["repeat_penalty"] = repeat_penalty
+    if min_p is not None:
+        options["min_p"] = min_p
     try:
         stream = await _client().chat(
             model=model or settings.chat_model,

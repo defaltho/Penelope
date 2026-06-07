@@ -13,6 +13,8 @@ export interface StoredMessage {
 	role: 'user' | 'assistant' | 'system';
 	content: string;
 	image_path: string | null;
+	model: string | null;
+	tok_per_sec: number | null;
 	created_at: string;
 }
 
@@ -104,7 +106,29 @@ export interface AppSettings {
 	ui_welcome: boolean;
 	ui_thinking: boolean;
 	ui_text_emojis: boolean;
+	search_provider: string;
+	search_results: number;
+	search_url: string;
+	tools_disabled: string;
+	adventure_model: string;
+	adventure_model_fallback: string;
+	adventure_temperature: number;
+	adventure_repeat_penalty: number;
+	adventure_min_p: number;
+	adventures: string;
 }
+
+export interface WebResult {
+	title: string;
+	url: string;
+	snippet: string;
+}
+export const searchWeb = (query: string) =>
+	fetch('/api/search/web', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ query })
+	}).then(json<{ results: WebResult[] }>);
 
 export const exportData = () => fetch('/api/data/export').then(json<unknown>);
 export const importData = (data: unknown) =>
@@ -155,6 +179,37 @@ export const compare = (prompt: string, modelA: string, modelB: string) =>
 		body: JSON.stringify({ prompt, model_a: modelA, model_b: modelB })
 	}).then(json<{ left: CompareSide; right: CompareSide }>);
 
+// ---- Documentos ----
+
+export interface Doc {
+	id: number;
+	title: string;
+	content: string;
+	updated_at: string;
+}
+
+export const listDocuments = () => fetch('/api/documents').then(json<Doc[]>);
+export const createDocument = (title: string, content: string) =>
+	fetch('/api/documents', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ title, content })
+	}).then(json<{ id: number }>);
+export const updateDocument = (id: number, patch: { title?: string; content?: string }) =>
+	fetch(`/api/documents/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	}).then(json);
+export const deleteDocument = (id: number) =>
+	fetch(`/api/documents/${id}`, { method: 'DELETE' }).then(json);
+export const assistDocument = (content: string, instruction: string) =>
+	fetch('/api/documents/assist', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ content, instruction })
+	}).then(json<{ text: string }>);
+
 // ---- Agents ----
 
 export interface AgentStep {
@@ -170,6 +225,83 @@ export const agentRun = (task: string) =>
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ task })
 	}).then(json<{ steps: AgentStep[]; final: string }>);
+
+export interface AgentTool {
+	name: string;
+	desc: string;
+	dangerous: boolean;
+	requires_internet: boolean;
+	enabled: boolean;
+}
+
+export const listAgentTools = () => fetch('/api/agent/tools').then(json<AgentTool[]>);
+
+// ---- Aventuras (/aidungeon, estilo AI Dungeon) ----
+
+export type AdventureMode = 'do' | 'say' | 'story' | 'continue';
+
+export interface AdventureTurnEntry {
+	role: 'user' | 'assistant';
+	mode: AdventureMode | null;
+	content: string;
+	ts: string;
+}
+
+export interface StoryCard {
+	keys: string[];
+	text: string;
+}
+
+export interface Adventure {
+	id: string;
+	title: string;
+	scenario: string;
+	instructions: string;
+	memory: string;
+	authors_note: string;
+	story_cards: StoryCard[];
+	model: string;
+	sampler: { temperature: number; repeat_penalty: number; min_p: number };
+	turns: AdventureTurnEntry[];
+	created_at: string;
+	updated_at: string;
+}
+
+export interface AdventureMeta {
+	id: string;
+	title: string;
+	scenario_summary: string;
+	model: string;
+	turn_count: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export const listAdventures = () => fetch('/api/adventures').then(json<AdventureMeta[]>);
+
+export const getAdventure = (id: string) =>
+	fetch(`/api/adventures/${id}`).then(json<Adventure>);
+
+export const createAdventure = (body: {
+	title?: string;
+	scenario?: string;
+	instructions?: string;
+}) =>
+	fetch('/api/adventures', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	}).then(json<Adventure>);
+
+export const patchAdventure = (id: string, patch: Partial<Adventure>) =>
+	fetch(`/api/adventures/${id}`, {
+		method: 'PATCH',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(patch)
+	}).then(json<Adventure>);
+
+export const deleteAdventure = (id: string) =>
+	fetch(`/api/adventures/${id}`, { method: 'DELETE' }).then(json);
 
 // ---- Notas ----
 

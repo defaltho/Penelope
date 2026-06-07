@@ -26,17 +26,19 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
+import adventure as adv_store
 import ollama_client as oc
 from config import settings
 from db import connect, fts5_available, init_schema
 from memory import MemoryService
 from schemas import (
+    AdventureCreate,
+    AdventurePatch,
+    AdventureTurn,
     AgentRunRequest,
     AgentStep,
     ChatRequest,
-    PipelineExtractRequest,
     SkillExtraction,
-    TransactionExtraction,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -168,10 +170,29 @@ async def chat(req: ChatRequest):
     num_ctx = _num("num_ctx", settings.num_ctx, int)
     max_tokens = _num("max_tokens", 0, int)
 
-    system_content = settings.base_system_prompt
+    # System prompt base: por defeito o do Penelope; se vier um override
+    # (ex.: modo /aidungeon, Mestre-de-Jogo) usa-se esse como base.
+    override = (req.system_override or "").strip()
+    system_content = override or settings.base_system_prompt
     system_extra = (cfg.get("system_extra") or "").strip()
     if system_extra:
         system_content += "\n\n" + system_extra
+
+    # Pesquisa web (estilo Odysseus): só com o toggle ligado E internet permitida.
+    if req.web_search and _internet_allowed(conn):
+        try:
+            web = await _web_search(conn, user_text)
+        except Exception as e:  # noqa: BLE001 - nunca rebentar o chat
+            web = []
+            log.warning("pesquisa web no chat falhou: %s", e)
+        if web:
+            block = "\n".join(
+                f"- {r['title']} ({r['url']}): {r['snippet']}" for r in web[:5]
+            )
+            system_content += (
+                "\n\nResultados de pesquisa web (usa-os para responder e cita as fontes "
+                "quando fizer sentido):\n" + block
+            )
 
     # Recuperar + injetar memória (se ativa E não em modo anónimo)
     if cfg["memory_enabled"] == "1" and not req.incognito:
@@ -199,9 +220,12 @@ async def chat(req: ChatRequest):
     if img_b64:
         messages[-1] = {**messages[-1], "images": [img_b64]}
 
-    holder = {"text": ""}
+    holder = {"text": "", "tokens": 0, "tps": None}
 
     async def event_gen():
+        import time as _time
+
+        started = None
         try:
             async for token in oc.chat_stream(
                 messages,
@@ -210,6 +234,9 @@ async def chat(req: ChatRequest):
                 temperature=temperature,
                 num_predict=(max_tokens or None),
             ):
+                if started is None:
+                    started = _time.monotonic()
+                holder["tokens"] += 1
                 holder["text"] += token
                 yield {"event": "token", "data": json.dumps({"token": token})}
         except oc.OllamaError as e:
@@ -217,15 +244,27 @@ async def chat(req: ChatRequest):
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
             return
 
+        # Velocidade (tokens por segundo), medida no servidor.
+        if started is not None and holder["tokens"] > 1:
+            elapsed = _time.monotonic() - started
+            if elapsed > 0:
+                holder["tps"] = holder["tokens"] / elapsed
+
         # MODO ANÓNIMO: não grava nada; termina o stream sem persistir.
         if req.incognito:
-            yield {"event": "done", "data": json.dumps({"conversation_id": None, "incognito": True})}
+            yield {
+                "event": "done",
+                "data": json.dumps(
+                    {"conversation_id": None, "incognito": True, "tok_per_sec": holder["tps"]}
+                ),
+            }
             return
 
-        # Persistir resposta do assistente
+        # Persistir resposta do assistente (com metadados persistentes)
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",
-            (conversation_id, holder["text"]),
+            "INSERT INTO messages (conversation_id, role, content, model, tok_per_sec) "
+            "VALUES (?, 'assistant', ?, ?, ?)",
+            (conversation_id, holder["text"], chat_model, holder["tps"]),
         )
         # Auto-título: derivar da 1ª mensagem do utilizador se ainda não houver.
         row = conn.execute(
@@ -244,7 +283,12 @@ async def chat(req: ChatRequest):
                     (title, conversation_id),
                 )
         conn.commit()
-        yield {"event": "done", "data": json.dumps({"conversation_id": conversation_id})}
+        yield {
+            "event": "done",
+            "data": json.dumps(
+                {"conversation_id": conversation_id, "model": chat_model, "tok_per_sec": holder["tps"]}
+            ),
+        }
 
     async def _post_exchange():
         # Corre depois da resposta ser enviada; nunca bloqueia o stream visível.
@@ -256,6 +300,221 @@ async def chat(req: ChatRequest):
             await _auto_skills(conn, user_text, holder["text"])
 
     return EventSourceResponse(event_gen(), background=BackgroundTask(_post_exchange))
+
+
+# ---------- Aventura (/aidungeon, estilo AI Dungeon) ----------
+#
+# O modo aventura corre LIMPO: NÃO injeta memória nem skills da Penelope. Usa só a
+# system message oficial da Latitude Games + o cenário/contexto persistente da própria
+# aventura, com o sampler do Harbinger-24B (temp 0.8, repeat_penalty 1.05, min_p 0.025).
+# Cada história vive num ficheiro (data/adventures/<id>.json); o índice de metadados é
+# arquivado nas settings (chave `adventures`).
+
+_CONTINUE_NUDGE = "Continua a narrativa a partir do último momento, sem repetir."
+
+
+def _sync_adventures_index(conn) -> list[dict]:
+    """Reconstrói o índice de aventuras a partir dos ficheiros e arquiva-o nas settings."""
+    index = adv_store.list_index()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('adventures', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (json.dumps(index, ensure_ascii=False),),
+    )
+    conn.commit()
+    return index
+
+
+def _adventure_sampler(cfg: dict) -> dict:
+    def _f(key, default):
+        try:
+            return float(cfg.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "temperature": _f("adventure_temperature", settings.adventure_temperature),
+        "repeat_penalty": _f("adventure_repeat_penalty", settings.adventure_repeat_penalty),
+        "min_p": _f("adventure_min_p", settings.adventure_min_p),
+    }
+
+
+def _resolve_adventure_model(cfg: dict) -> str:
+    """Modelo a usar no jogo: o de aventura se definido, senão o fallback, senão o de chat."""
+    return (
+        (cfg.get("adventure_model") or "").strip()
+        or (cfg.get("adventure_model_fallback") or "").strip()
+        or cfg["chat_model"]
+    )
+
+
+def _mode_frame(text: str, mode: str) -> str:
+    """Enquadra o input do jogador pela convenção de aventura (estilo Wayfarer/AI Dungeon)."""
+    text = (text or "").strip()
+    if mode == "say":
+        return f'> Dizes: "{text}"'
+    if mode == "story":
+        return text  # narração crua: o MJ responde-lhe
+    return f"> {text}"  # do (ação)
+
+
+def _triggered_cards(adv: dict, recent_text: str) -> list[str]:
+    """Story Cards cujas keywords aparecem no contexto recente (world info por gatilho)."""
+    low = recent_text.lower()
+    out = []
+    for card in adv.get("story_cards", []):
+        keys = card.get("keys", [])
+        if any(k and k.lower() in low for k in keys):
+            txt = (card.get("text") or "").strip()
+            if txt:
+                out.append(txt)
+    return out
+
+
+def _build_adventure_messages(adv: dict, *, new_user: str | None) -> list[dict]:
+    """Monta as mensagens do turno: system (Latitude + contexto) + história + novo input."""
+    history = [{"role": t["role"], "content": t["content"]} for t in adv.get("turns", [])]
+
+    # Texto recente para acionar Story Cards (últimos turnos + input).
+    recent = "\n".join(t["content"] for t in adv.get("turns", [])[-6:])
+    if new_user:
+        recent += "\n" + new_user
+
+    parts = [settings.adventure_system_prompt]
+    if adv.get("scenario"):
+        parts.append("Cenário:\n" + adv["scenario"])
+    if adv.get("instructions"):
+        parts.append("Instruções:\n" + adv["instructions"])
+    if adv.get("memory"):
+        parts.append("Memória da história (mantém coerência):\n" + adv["memory"])
+    if adv.get("authors_note"):
+        parts.append("Nota de autor (estilo/foco):\n" + adv["authors_note"])
+    cards = _triggered_cards(adv, recent)
+    if cards:
+        parts.append("Contexto relevante:\n" + "\n".join(f"- {c}" for c in cards))
+    system_content = "\n\n".join(parts)
+
+    messages = [{"role": "system", "content": system_content}, *history]
+    if new_user is not None:
+        messages.append({"role": "user", "content": new_user})
+    return messages
+
+
+@app.get("/adventures")
+async def list_adventures():
+    return adv_store.list_index()
+
+
+@app.post("/adventures")
+async def create_adventure(req: AdventureCreate):
+    conn = app.state.conn
+    cfg = _get_settings(conn)
+    adv = adv_store.create(
+        title=req.title,
+        scenario=req.scenario,
+        instructions=req.instructions,
+        model=_resolve_adventure_model(cfg),
+        sampler=_adventure_sampler(cfg),
+    )
+    _sync_adventures_index(conn)
+    return adv
+
+
+@app.get("/adventures/{adv_id}")
+async def get_adventure(adv_id: str):
+    try:
+        adv = adv_store.load(adv_id)
+    except ValueError:
+        raise HTTPException(400, "id inválido")
+    if adv is None:
+        raise HTTPException(404, "aventura não encontrada")
+    return adv
+
+
+@app.patch("/adventures/{adv_id}")
+async def patch_adventure(adv_id: str, body: AdventurePatch):
+    conn = app.state.conn
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        adv = adv_store.patch(adv_id, fields)
+    except ValueError:
+        raise HTTPException(400, "id inválido")
+    if adv is None:
+        raise HTTPException(404, "aventura não encontrada")
+    _sync_adventures_index(conn)
+    return adv
+
+
+@app.delete("/adventures/{adv_id}")
+async def delete_adventure(adv_id: str):
+    conn = app.state.conn
+    try:
+        ok = adv_store.delete(adv_id)
+    except ValueError:
+        raise HTTPException(400, "id inválido")
+    if not ok:
+        raise HTTPException(404, "aventura não encontrada")
+    _sync_adventures_index(conn)
+    return {"ok": True}
+
+
+@app.post("/adventures/{adv_id}/turn")
+async def adventure_turn(adv_id: str, req: AdventureTurn):
+    conn = app.state.conn
+    try:
+        adv = adv_store.load(adv_id)
+    except ValueError:
+        raise HTTPException(400, "id inválido")
+    if adv is None:
+        raise HTTPException(404, "aventura não encontrada")
+
+    cfg = _get_settings(conn)
+    model = adv.get("model") or _resolve_adventure_model(cfg)
+    sampler = adv.get("sampler") or _adventure_sampler(cfg)
+
+    mode = req.mode.value
+    is_continue = mode == "continue"
+    # O input enquadrado é gravado como turno; em continue não há turno do jogador.
+    saved_user = None if is_continue else _mode_frame(req.input, mode)
+    # Em continue enviamos um "empurrão" transitório (não gravado) para o modelo gerar.
+    sent_user = _CONTINUE_NUDGE if is_continue else saved_user
+
+    messages = _build_adventure_messages(adv, new_user=sent_user)
+    holder = {"text": ""}
+
+    async def event_gen():
+        import time as _time
+
+        started = None
+        try:
+            async for token in oc.chat_stream(
+                messages,
+                model=model,
+                temperature=sampler.get("temperature"),
+                repeat_penalty=sampler.get("repeat_penalty"),
+                min_p=sampler.get("min_p"),
+            ):
+                if started is None:
+                    started = _time.monotonic()
+                holder["text"] += token
+                yield {"event": "token", "data": json.dumps({"token": token})}
+        except oc.OllamaError as e:
+            log.error("erro de aventura: %s", e)
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            return
+
+        # Persistir os turnos no ficheiro da aventura + atualizar o índice.
+        if saved_user is not None:
+            adv_store.append_turn(adv_id, role="user", content=saved_user, mode=mode)
+        adv_store.append_turn(adv_id, role="assistant", content=holder["text"], mode=mode)
+        _sync_adventures_index(conn)
+
+        yield {
+            "event": "done",
+            "data": json.dumps({"adventure_id": adv_id, "model": model}),
+        }
+
+    return EventSourceResponse(event_gen())
 
 
 # ---------- Imagem (visão geral, Stage 2) ----------
@@ -374,7 +633,7 @@ async def get_conversation_messages(conversation_id: int):
     if row is None:
         raise HTTPException(404, f"conversa {conversation_id} não existe")
     rows = conn.execute(
-        "SELECT role, content, image_path, created_at FROM messages "
+        "SELECT role, content, image_path, model, tok_per_sec, created_at FROM messages "
         "WHERE conversation_id = ? ORDER BY id",
         (conversation_id,),
     ).fetchall()
@@ -501,27 +760,218 @@ async def delete_fact(fact_id: int):
     return {"deleted": fact_id}
 
 
-# ---------- Agents (loop simples com ferramentas locais seguras) ----------
+# ---------- Pesquisa web (estilo Odysseus: DuckDuckGo / SearXNG) ----------
 
-_AGENT_SYSTEM = (
-    "És um agente que cumpre a tarefa do utilizador usando ferramentas LOCAIS. "
-    "Ferramentas:\n"
-    "- data_hora(): data e hora atuais.\n"
-    "- pesquisar_memoria(query): procura factos guardados sobre o utilizador.\n"
-    "- criar_nota(titulo, conteudo): cria uma nota.\n"
-    "- criar_tarefa(texto): adiciona uma tarefa.\n"
-    "- listar_tarefas(): lista as tarefas.\n"
-    "- abrir_pagina(url): lê o texto de uma página web (SÓ funciona se a internet "
-    "estiver ativada nas Definições; por defeito está desligada).\n\n"
-    "A cada passo devolve JSON. Para usar uma ferramenta: {thought, tool, args}. "
-    "Quando a tarefa estiver concluída: {thought, final: <resposta ao utilizador>}. "
-    "Usa o mínimo de passos possível e não inventes resultados de ferramentas."
+async def _web_search(conn, query: str) -> list[dict]:
+    """Pesquisa na web e devolve [{title, url, snippet}]. Réplica do padrão do
+    Odysseus (DuckDuckGo por scrape de html.duckduckgo.com, ou SearXNG via JSON).
+    GATED: o chamador tem de garantir _internet_allowed."""
+    import re as _r
+    import urllib.parse as _up
+
+    cfg = _get_settings(conn)
+    try:
+        count = max(1, min(10, int(cfg.get("search_results") or 5)))
+    except (TypeError, ValueError):
+        count = 5
+    provider = (cfg.get("search_provider") or "duckduckgo").lower()
+    searxng_url = (cfg.get("search_url") or "").strip().rstrip("/")
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    import httpx
+
+    # SearXNG (instância self-hosted), JSON API.
+    if provider == "searxng" and searxng_url:
+        try:
+            async with httpx.AsyncClient(timeout=12) as c:
+                r = await c.get(
+                    f"{searxng_url}/search",
+                    params={"q": query, "format": "json"},
+                    headers=headers,
+                )
+                data = r.json()
+            return [
+                {"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("content", "")}
+                for x in (data.get("results") or [])[:count]
+                if x.get("url")
+            ]
+        except Exception as e:  # noqa: BLE001 - cai para DuckDuckGo
+            log.warning("searxng falhou (%s); fallback DuckDuckGo", e)
+
+    # DuckDuckGo (sem chave): scrape de html.duckduckgo.com.
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as c:
+            r = await c.post("https://html.duckduckgo.com/html/", data={"q": query}, headers=headers)
+            html = r.text
+    except Exception as e:  # noqa: BLE001
+        log.warning("duckduckgo falhou: %s", e)
+        return []
+
+    results: list[dict] = []
+    for m in _r.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, _r.S):
+        href, raw_title = m.group(1), m.group(2)
+        mu = _r.search(r"uddg=([^&]+)", href)
+        url = _up.unquote(mu.group(1)) if mu else href
+        if url.startswith("//"):
+            url = "https:" + url
+        title = _r.sub(r"<[^>]+>", "", raw_title).strip()
+        results.append({"title": title, "url": url, "snippet": ""})
+        if len(results) >= count:
+            break
+    snippets = _r.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, _r.S)
+    for i, s in enumerate(snippets[: len(results)]):
+        results[i]["snippet"] = _r.sub(r"<[^>]+>", "", s).strip()
+    return results
+
+
+@app.post("/search/web")
+async def search_web(body: dict):
+    conn = app.state.conn
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(400, "falta a query")
+    # GATE DE INTERNET (fail-closed).
+    if not _internet_allowed(conn):
+        raise HTTPException(403, "acesso à internet desligado — ativa-o nas Definições")
+    return {"results": await _web_search(conn, query)}
+
+
+# ---------- Agents (loop com ferramentas locais — estilo Odysseus) ----------
+
+# Registo de ferramentas (à imagem dos "Built-in Tools" do Odysseus, mas local).
+#   dangerous=True       -> DESLIGADA por defeito; só liga nas Definições (com aviso).
+#   requires_internet=True -> atrás do gate de internet (fail-closed).
+# A ordem é a que aparece ao modelo no system prompt.
+_TOOL_REGISTRY: list[dict] = [
+    {"name": "data_hora", "desc": "data e hora atuais.", "dangerous": False, "requires_internet": False},
+    {"name": "pesquisar_memoria", "desc": "procura factos guardados sobre o utilizador. args: query", "dangerous": False, "requires_internet": False},
+    {"name": "pesquisar_conversas", "desc": "procura em conversas antigas. args: query", "dangerous": False, "requires_internet": False},
+    {"name": "criar_nota", "desc": "cria uma nota. args: titulo, conteudo", "dangerous": False, "requires_internet": False},
+    {"name": "listar_notas", "desc": "lista as notas.", "dangerous": False, "requires_internet": False},
+    {"name": "criar_tarefa", "desc": "adiciona uma tarefa. args: texto", "dangerous": False, "requires_internet": False},
+    {"name": "listar_tarefas", "desc": "lista as tarefas.", "dangerous": False, "requires_internet": False},
+    {"name": "concluir_tarefa", "desc": "marca como concluída a tarefa que contém o texto. args: texto", "dangerous": False, "requires_internet": False},
+    {"name": "criar_documento", "desc": "cria um documento. args: titulo, conteudo", "dangerous": False, "requires_internet": False},
+    {"name": "listar_modelos", "desc": "lista os modelos Ollama instalados.", "dangerous": False, "requires_internet": False},
+    {"name": "gerir_skills", "desc": "gere instruções reutilizáveis. args: accao(listar|criar), nome, instrucao", "dangerous": False, "requires_internet": False},
+    {"name": "ler_ficheiro", "desc": "lê um ficheiro de texto DENTRO da pasta do projeto. args: caminho", "dangerous": False, "requires_internet": False},
+    {"name": "pesquisar_web", "desc": "pesquisa na web. args: query", "dangerous": False, "requires_internet": True},
+    {"name": "abrir_pagina", "desc": "lê o texto de uma página web. args: url", "dangerous": False, "requires_internet": True},
+    # PERIGOSAS — desligadas por defeito (acesso à máquina). Ligar é decisão explícita.
+    {"name": "escrever_ficheiro", "desc": "escreve/cria um ficheiro DENTRO da pasta do projeto. args: caminho, conteudo", "dangerous": True, "requires_internet": False},
+    {"name": "bash", "desc": "executa um comando de shell com ACESSO TOTAL à máquina. args: comando", "dangerous": True, "requires_internet": False},
+    {"name": "python", "desc": "executa código Python num subprocesso com ACESSO TOTAL. args: codigo", "dangerous": True, "requires_internet": False},
+]
+
+# Ferramentas perigosas DESLIGADAS por defeito (até o utilizador as ligar).
+_DEFAULT_DISABLED_TOOLS = [t["name"] for t in _TOOL_REGISTRY if t["dangerous"]]
+
+_AGENT_RULES = (
+    "\n\nREGRAS:\n"
+    "1. A cada passo devolve SÓ um JSON. Para agir: {\"thought\": \"...\", \"tool\": "
+    "\"nome\", \"args\": {...}}.\n"
+    "2. Quando tiveres a resposta, devolve {\"thought\": \"...\", \"final\": \"<a "
+    "resposta DIRETA ao utilizador, sem explicar o teu raciocínio>\"}.\n"
+    "3. O campo `final` é a mensagem que o utilizador vê: escreve-a de forma natural "
+    "e completa, NÃO descrevas o que fizeste nem menciones ferramentas.\n"
+    "4. Usa o mínimo de passos. Não inventes resultados; usa as observações reais.\n"
+    "5. Para tarefas simples (ex.: uma saudação ou uma pergunta de conhecimento "
+    "geral) responde logo com `final`, sem ferramentas.\n"
+    "6. Só podes usar as ferramentas listadas acima. As que não aparecem estão "
+    "desativadas e devolverão um erro se as tentares."
 )
+
+
+def _disabled_tools(conn) -> set[str]:
+    """Conjunto de ferramentas desativadas nas Definições (perigosas off por defeito)."""
+    raw = _get_settings(conn).get("tools_disabled")
+    if raw is None:
+        return set(_DEFAULT_DISABLED_TOOLS)
+    try:
+        return set(json.loads(raw))
+    except (ValueError, TypeError):
+        return set(_DEFAULT_DISABLED_TOOLS)
+
+
+def _tool_allowed(conn, name: str) -> tuple[bool, str]:
+    """Gate central: existe? está ligada? a internet (se preciso) está ligada?"""
+    spec = next((t for t in _TOOL_REGISTRY if t["name"] == name), None)
+    if spec is None:
+        return False, f"ferramenta desconhecida '{name}'"
+    if name in _disabled_tools(conn):
+        return False, f"ferramenta '{name}' está DESATIVADA nas Definições"
+    if spec["requires_internet"] and not _internet_allowed(conn):
+        return False, "acesso à internet desligado — ativa-o nas Definições"
+    return True, ""
+
+
+def _agent_system(conn) -> str:
+    """System prompt do agente, listando apenas as ferramentas atualmente ativas."""
+    disabled = _disabled_tools(conn)
+    inet = _internet_allowed(conn)
+    lines = []
+    for t in _TOOL_REGISTRY:
+        if t["name"] in disabled:
+            continue
+        if t["requires_internet"] and not inet:
+            continue
+        lines.append(f"- {t['name']}: {t['desc']}")
+    header = (
+        "És um agente que cumpre a tarefa do utilizador usando ferramentas LOCAIS. "
+        "Ferramentas disponíveis:\n" + "\n".join(lines)
+    )
+    return header + _AGENT_RULES
+
+
+def _safe_project_path(rel: str) -> str | None:
+    """Resolve um caminho relativo e garante que fica DENTRO da raiz do projeto."""
+    base = os.path.realpath(settings.project_root)
+    full = os.path.realpath(os.path.join(base, rel))
+    if full == base or full.startswith(base + os.sep):
+        return full
+    return None
+
+
+async def _run_subprocess(argv: list[str] | None = None, *, shell: str | None = None, timeout: int = 30) -> str:
+    """Executa um subprocesso (lista de args OU comando de shell) com timeout."""
+    import asyncio
+
+    try:
+        if shell is not None:
+            proc = await asyncio.create_subprocess_shell(
+                shell,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=settings.project_root,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *(argv or []),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=settings.project_root,
+            )
+    except Exception as e:  # noqa: BLE001
+        return f"erro ao arrancar: {e}"
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return f"erro: tempo esgotado ({timeout}s)"
+    text = (out or b"").decode("utf-8", "replace")
+    return f"(saída exit={proc.returncode})\n{text[:2000]}"
 
 
 async def _agent_tool(conn, memory, name: str, args: dict) -> str:
     name = (name or "").strip()
     args = args or {}
+    # GATE CENTRAL (fail-closed): existência + ativação + internet.
+    ok, why = _tool_allowed(conn, name)
+    if not ok:
+        return f"BLOQUEADO: {why}"
     if name == "data_hora":
         import datetime
         return datetime.datetime.now().strftime("Agora: %Y-%m-%d %H:%M")
@@ -539,6 +989,34 @@ async def _agent_tool(conn, memory, name: str, args: dict) -> str:
         conn.execute("INSERT INTO notes (title, content) VALUES (?, ?)", (title[:120], content))
         conn.commit()
         return f"nota criada: {title or '(sem título)'}"
+    if name == "pesquisar_conversas":
+        q = str(args.get("query") or args.get("consulta") or "").strip()
+        if not q:
+            return "erro: falta 'query'"
+        import re as _re3
+
+        toks = [t for t in _re3.findall(r"\w+", q.lower())]
+        if not toks:
+            return "sem resultados"
+        match = " ".join(f"{t}*" for t in toks)
+        try:
+            rows = conn.execute(
+                "SELECT m.content FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid "
+                "WHERE messages_fts MATCH ? ORDER BY m.id DESC LIMIT 5",
+                (match,),
+            ).fetchall()
+        except Exception:
+            return "sem resultados"
+        return ("Encontrado: " + " | ".join((r["content"] or "")[:80] for r in rows)) if rows else "sem resultados"
+    if name == "listar_notas":
+        rows = conn.execute("SELECT title FROM notes ORDER BY updated_at DESC LIMIT 20").fetchall()
+        return ("Notas: " + " | ".join(r["title"] or "(sem título)" for r in rows)) if rows else "sem notas"
+    if name == "criar_documento":
+        title = str(args.get("titulo") or args.get("title") or "Novo documento").strip()
+        content = str(args.get("conteudo") or args.get("content") or "")
+        conn.execute("INSERT INTO documents (title, content) VALUES (?, ?)", (title[:160], content))
+        conn.commit()
+        return f"documento criado: {title}"
     if name == "criar_tarefa":
         text = str(args.get("texto") or args.get("text") or "").strip()
         if not text:
@@ -546,6 +1024,15 @@ async def _agent_tool(conn, memory, name: str, args: dict) -> str:
         conn.execute("INSERT INTO tasks (text) VALUES (?)", (text,))
         conn.commit()
         return f"tarefa criada: {text}"
+    if name == "concluir_tarefa":
+        text = str(args.get("texto") or args.get("text") or "").strip()
+        if not text:
+            return "erro: falta o texto da tarefa"
+        cur = conn.execute(
+            "UPDATE tasks SET done = 1 WHERE done = 0 AND text LIKE ?", (f"%{text}%",)
+        )
+        conn.commit()
+        return f"{cur.rowcount} tarefa(s) marcada(s) como concluída(s)"
     if name == "listar_tarefas":
         rows = conn.execute(
             "SELECT text, done FROM tasks ORDER BY done, id DESC LIMIT 20"
@@ -554,6 +1041,19 @@ async def _agent_tool(conn, memory, name: str, args: dict) -> str:
             return "sem tarefas"
         return "Tarefas: " + " | ".join(
             ("[x] " if r["done"] else "[ ] ") + r["text"] for r in rows
+        )
+    if name == "pesquisar_web":
+        # GATED: só com internet explicitamente ativada (fail-closed).
+        if not _internet_allowed(conn):
+            return "BLOQUEADO: acesso à internet desligado. Ativa-o nas Definições para pesquisar."
+        q = str(args.get("query") or args.get("consulta") or "").strip()
+        if not q:
+            return "erro: falta 'query'"
+        res = await _web_search(conn, q)
+        if not res:
+            return "sem resultados"
+        return "Resultados:\n" + "\n".join(
+            f"- {r['title']} ({r['url']}): {r['snippet'][:140]}" for r in res[:5]
         )
     if name == "abrir_pagina":
         # GATED: só com internet explicitamente ativada (fail-closed).
@@ -576,7 +1076,96 @@ async def _agent_tool(conn, memory, name: str, args: dict) -> str:
             return f"Conteúdo de {url} (truncado): {txt[:1500]}"
         except Exception as e:  # noqa: BLE001
             return f"erro ao abrir página: {e}"
+    if name == "listar_modelos":
+        try:
+            models = await oc.list_models()
+        except oc.OllamaError as e:
+            return f"erro ao listar modelos: {e}"
+        return ("Modelos: " + ", ".join(models)) if models else "sem modelos instalados"
+    if name == "gerir_skills":
+        accao = str(args.get("accao") or args.get("action") or "listar").strip().lower()
+        if accao in ("criar", "create", "add"):
+            nome = str(args.get("nome") or args.get("name") or "").strip()
+            instr = str(args.get("instrucao") or args.get("instruction") or "").strip()
+            if not nome or not instr:
+                return "erro: 'nome' e 'instrucao' são obrigatórios"
+            conn.execute(
+                "INSERT INTO skills (name, instruction, enabled) VALUES (?, ?, 1)",
+                (nome[:60], instr),
+            )
+            conn.commit()
+            return f"skill criada: {nome[:60]}"
+        rows = conn.execute(
+            "SELECT name, enabled FROM skills ORDER BY id DESC LIMIT 30"
+        ).fetchall()
+        if not rows:
+            return "sem skills"
+        return "Skills: " + " | ".join(
+            (r["name"] or "(sem nome)") + ("" if r["enabled"] else " (off)") for r in rows
+        )
+    if name == "ler_ficheiro":
+        rel = str(args.get("caminho") or args.get("path") or "").strip()
+        if not rel:
+            return "erro: falta 'caminho'"
+        full = _safe_project_path(rel)
+        if full is None:
+            return "BLOQUEADO: caminho fora da pasta do projeto."
+        if not os.path.isfile(full):
+            return f"erro: ficheiro não encontrado: {rel}"
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                data = f.read(4000)
+        except Exception as e:  # noqa: BLE001
+            return f"erro ao ler: {e}"
+        return f"Conteúdo de {rel} (truncado):\n{data}"
+    if name == "escrever_ficheiro":
+        rel = str(args.get("caminho") or args.get("path") or "").strip()
+        content = str(args.get("conteudo") or args.get("content") or "")
+        if not rel:
+            return "erro: falta 'caminho'"
+        full = _safe_project_path(rel)
+        if full is None:
+            return "BLOQUEADO: caminho fora da pasta do projeto."
+        try:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as f:
+                f.write(content)
+        except Exception as e:  # noqa: BLE001
+            return f"erro ao escrever: {e}"
+        log.warning("AGENT escrever_ficheiro: %s (%d bytes)", rel, len(content))
+        return f"ficheiro escrito: {rel} ({len(content)} bytes)"
+    if name == "bash":
+        cmd = str(args.get("comando") or args.get("command") or "").strip()
+        if not cmd:
+            return "erro: falta 'comando'"
+        log.warning("AGENT bash: %s", cmd)
+        return await _run_subprocess(shell=cmd)
+    if name == "python":
+        import sys as _sys
+
+        code = str(args.get("codigo") or args.get("code") or "")
+        if not code.strip():
+            return "erro: falta 'codigo'"
+        log.warning("AGENT python: %d chars", len(code))
+        return await _run_subprocess([_sys.executable, "-c", code])
     return f"erro: ferramenta desconhecida '{name}'"
+
+
+@app.get("/agent/tools")
+async def agent_tools():
+    """Registo de ferramentas + estado (ligada/desligada) para o painel de Definições."""
+    conn = app.state.conn
+    disabled = _disabled_tools(conn)
+    return [
+        {
+            "name": t["name"],
+            "desc": t["desc"],
+            "dangerous": t["dangerous"],
+            "requires_internet": t["requires_internet"],
+            "enabled": t["name"] not in disabled,
+        }
+        for t in _TOOL_REGISTRY
+    ]
 
 
 @app.post("/agent/run")
@@ -592,9 +1181,10 @@ async def agent_run(req: AgentRunRequest):
     final: str | None = None
     MAX_STEPS = 5
 
+    agent_system = _agent_system(conn)
     for _ in range(MAX_STEPS):
         messages = [
-            {"role": "system", "content": _AGENT_SYSTEM},
+            {"role": "system", "content": agent_system},
             {"role": "user", "content": "\n".join(convo) + "\n\nDecide o próximo passo (JSON)."},
         ]
         try:
@@ -621,88 +1211,6 @@ async def agent_run(req: AgentRunRequest):
     if final is None:
         final = "(atingi o limite de passos sem concluir a tarefa)"
     return {"steps": steps, "final": final}
-
-
-# ---------- Pipeline de estruturação (Stage 3) ----------
-
-_PIPELINE_SYSTEM = (
-    "És um extrator de transações financeiras. A partir do texto fornecido (que pode "
-    "ser a transcrição de um recibo/extrato), devolve uma transação estruturada. "
-    "REGRAS: para qualquer campo ausente devolve null (NUNCA inventes). Confia em "
-    "números, datas e totais; comerciante e categoria são menos fiáveis: se tiveres "
-    "dúvida, inclui o nome do campo em low_confidence_fields. Datas em ISO "
-    "YYYY-MM-DD; amount e currency a partir do total. Responde só com o JSON do schema."
-)
-
-
-@app.post("/pipeline/extract", response_model=TransactionExtraction)
-async def pipeline_extract(req: PipelineExtractRequest):
-    source_text = req.text.strip()
-
-    # Se vier imagem: transcrever primeiro (texto->JSON é mais fiável que JSON direto).
-    if req.image_base64 and req.image_base64.strip():
-        raw = _decode_image(req.image_base64)
-        jpeg = _resize_to_jpeg_bytes(raw, settings.vision_max_dim)
-        img_b64 = base64.b64encode(jpeg).decode("ascii")
-        try:
-            transcription = await oc.vision_describe(
-                img_b64,
-                prompt="Transcreve TODO o texto visível nesta imagem, exatamente como aparece.",
-            )
-        except oc.OllamaError as e:
-            raise HTTPException(502, f"transcrição falhou: {e}")
-        source_text = (source_text + "\n\n" + transcription).strip() if source_text else transcription
-
-    if not source_text:
-        raise HTTPException(400, "fornece texto ou imagem")
-
-    messages = [
-        {"role": "system", "content": _PIPELINE_SYSTEM},
-        {"role": "user", "content": f"Texto:\n{source_text}\n\nExtrai a transação."},
-    ]
-    try:
-        raw_json = await oc.extract_json(
-            messages, schema=TransactionExtraction.model_json_schema()
-        )
-        return TransactionExtraction.model_validate(raw_json)
-    except (oc.OllamaError, Exception) as e:  # noqa: BLE001
-        log.error("extração de pipeline falhou: %s", e)
-        raise HTTPException(502, f"extração falhou: {e}")
-
-
-@app.post("/pipeline/dispatch")
-async def pipeline_dispatch(tx: TransactionExtraction):
-    conn = app.state.conn
-    # Registar sempre localmente (Stage 3, passo "registar + aprender").
-    cur = conn.execute(
-        "INSERT INTO transactions (date, amount, currency, merchant, category, account, notes) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (tx.date, tx.amount, tx.currency, tx.merchant, tx.category, tx.account, tx.notes),
-    )
-    tx_id = cur.lastrowid
-    conn.commit()
-
-    dispatch_url = _get_settings(conn)["dispatch_url"]
-    dispatched = False
-    detail = "guardado localmente (sem endpoint de destino configurado)"
-    # GATE DE INTERNET (fail-closed): nenhuma saída sem o utilizador ligar a internet.
-    if dispatch_url and not _internet_allowed(conn):
-        detail = "guardado localmente (acesso à internet desligado — ativa-o nas Definições)"
-    elif dispatch_url:
-        try:
-            import httpx
-
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(dispatch_url, json=tx.model_dump())
-                r.raise_for_status()
-            dispatched = True
-            detail = f"despachado para {dispatch_url}"
-            conn.execute("UPDATE transactions SET dispatched = 1 WHERE id = ?", (tx_id,))
-            conn.commit()
-        except Exception as e:  # noqa: BLE001
-            detail = f"falha ao despachar: {e} (guardado localmente)"
-
-    return {"id": tx_id, "dispatched": dispatched, "detail": detail}
 
 
 # ---------- Skills (instruções reutilizáveis) ----------
@@ -953,6 +1461,21 @@ def _get_settings(conn) -> dict:
         "ui_welcome": "1",
         "ui_thinking": "0",
         "ui_text_emojis": "0",
+        # Pesquisa web (estilo Odysseus). Requer internet ligada (fail-closed).
+        "search_provider": "duckduckgo",
+        "search_results": "5",
+        "search_url": "",  # instância SearXNG (vazio = usar DuckDuckGo)
+        # Agent tools: lista JSON das ferramentas DESATIVADAS (perigosas off por defeito).
+        "tools_disabled": json.dumps(_DEFAULT_DISABLED_TOOLS),
+        # Jogo /aidungeon: modelo de aventura (vazio = usar o fallback já instalado).
+        "adventure_model": settings.adventure_model,
+        "adventure_model_fallback": settings.adventure_model_fallback,
+        # Sampler oficial do Harbinger-24B (Latitude Games).
+        "adventure_temperature": str(settings.adventure_temperature),
+        "adventure_repeat_penalty": str(settings.adventure_repeat_penalty),
+        "adventure_min_p": str(settings.adventure_min_p),
+        # Índice (metadados) das sessões de aventura, arquivado nas settings.
+        "adventures": "[]",
     }
     for r in conn.execute("SELECT key, value FROM app_settings").fetchall():
         out[r["key"]] = r["value"]
@@ -1012,6 +1535,16 @@ async def get_settings():
         "ui_welcome": s["ui_welcome"] == "1",
         "ui_thinking": s["ui_thinking"] == "1",
         "ui_text_emojis": s["ui_text_emojis"] == "1",
+        "search_provider": s["search_provider"],
+        "search_results": _i("search_results", 5),
+        "search_url": s["search_url"],
+        "tools_disabled": s["tools_disabled"],
+        "adventure_model": s["adventure_model"],
+        "adventure_model_fallback": s["adventure_model_fallback"],
+        "adventure_temperature": _f("adventure_temperature", settings.adventure_temperature),
+        "adventure_repeat_penalty": _f("adventure_repeat_penalty", settings.adventure_repeat_penalty),
+        "adventure_min_p": _f("adventure_min_p", settings.adventure_min_p),
+        "adventures": s["adventures"],
     }
 
 
@@ -1026,6 +1559,15 @@ async def put_settings(body: dict):
         "num_ctx",
         "max_tokens",
         "user_name",
+        "search_provider",
+        "search_results",
+        "search_url",
+        "tools_disabled",
+        "adventure_model",
+        "adventure_model_fallback",
+        "adventure_temperature",
+        "adventure_repeat_penalty",
+        "adventure_min_p",
     } | _BOOL_KEYS
     for key in allowed & body.keys():
         val = body[key]
@@ -1044,6 +1586,30 @@ async def put_settings(body: dict):
         elif key == "max_tokens":
             try:
                 val = min(8192, max(0, int(float(val))))
+            except (TypeError, ValueError):
+                continue
+        elif key == "adventure_temperature":
+            try:
+                val = min(2.0, max(0.0, float(val)))
+            except (TypeError, ValueError):
+                continue
+        elif key == "adventure_repeat_penalty":
+            try:
+                val = min(2.0, max(1.0, float(val)))
+            except (TypeError, ValueError):
+                continue
+        elif key == "adventure_min_p":
+            try:
+                val = min(1.0, max(0.0, float(val)))
+            except (TypeError, ValueError):
+                continue
+        elif key == "tools_disabled":
+            # Aceita lista (do frontend) ou string JSON; guarda sempre JSON válido,
+            # filtrando para nomes de ferramentas reais.
+            try:
+                items = val if isinstance(val, list) else json.loads(val)
+                names = {t["name"] for t in _TOOL_REGISTRY}
+                val = json.dumps([n for n in items if n in names])
             except (TypeError, ValueError):
                 continue
         conn.execute(
@@ -1202,6 +1768,88 @@ async def delete_task(task_id: int):
     if cur.rowcount == 0:
         raise HTTPException(404, f"tarefa {task_id} não existe")
     return {"deleted": task_id}
+
+
+# ---------- Documentos (editor com IA a assistir) ----------
+
+@app.get("/documents")
+async def list_documents():
+    conn = app.state.conn
+    rows = conn.execute(
+        "SELECT id, title, content, updated_at FROM documents ORDER BY updated_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/documents")
+async def create_document(body: dict):
+    conn = app.state.conn
+    title = (body.get("title") or "Novo documento").strip()
+    content = body.get("content") or ""
+    cur = conn.execute(
+        "INSERT INTO documents (title, content) VALUES (?, ?)", (title[:160], content)
+    )
+    conn.commit()
+    return {"id": cur.lastrowid}
+
+
+@app.patch("/documents/{doc_id}")
+async def update_document(doc_id: int, body: dict):
+    conn = app.state.conn
+    fields, params = [], []
+    if "title" in body:
+        fields.append("title = ?")
+        params.append((body.get("title") or "").strip()[:160])
+    if "content" in body:
+        fields.append("content = ?")
+        params.append(body.get("content") or "")
+    if not fields:
+        raise HTTPException(400, "nada para atualizar")
+    fields.append("updated_at = datetime('now')")
+    params.append(doc_id)
+    cur = conn.execute(f"UPDATE documents SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(404, f"documento {doc_id} não existe")
+    return {"id": doc_id}
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document(doc_id: int):
+    conn = app.state.conn
+    cur = conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    conn.commit()
+    if cur.rowcount == 0:
+        raise HTTPException(404, f"documento {doc_id} não existe")
+    return {"deleted": doc_id}
+
+
+_DOC_ASSIST_SYSTEM = (
+    "És um assistente de escrita. O utilizador escreve; tu ajudas. Recebes o TEXTO "
+    "atual e uma INSTRUÇÃO. Aplica a instrução e devolve APENAS o texto resultante "
+    "(sem comentários, sem aspas à volta). Mantém a língua do texto."
+)
+
+
+@app.post("/documents/assist")
+async def document_assist(body: dict):
+    content = (body.get("content") or "").strip()
+    instruction = (body.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(400, "falta a instrução")
+    cfg = _get_settings(app.state.conn)
+    messages = [
+        {"role": "system", "content": _DOC_ASSIST_SYSTEM},
+        {
+            "role": "user",
+            "content": f"TEXTO:\n{content or '(vazio)'}\n\nINSTRUÇÃO: {instruction}",
+        },
+    ]
+    try:
+        out = await oc.chat_once(messages, model=cfg["chat_model"])
+    except oc.OllamaError as e:
+        raise HTTPException(502, f"assistência falhou: {e}")
+    return {"text": out}
 
 
 # ---------- Dados (backup + danger zone) ----------

@@ -144,6 +144,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT
 );
 
+-- Documentos (vista Documentos: tu escreves, a IA assiste).
+CREATE TABLE IF NOT EXISTS documents (
+    id          INTEGER PRIMARY KEY,
+    title       TEXT NOT NULL DEFAULT '',
+    content     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Factos candidatos a aprovar (modo de revisão da memória autónoma).
 CREATE TABLE IF NOT EXISTS pending_facts (
     id          INTEGER PRIMARY KEY,
@@ -174,6 +183,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
     if not _column_exists(conn, "messages", "image_path"):
         conn.execute("ALTER TABLE messages ADD COLUMN image_path TEXT")
+    # Metadados persistentes por mensagem do assistente (modelo + velocidade).
+    if not _column_exists(conn, "messages", "model"):
+        conn.execute("ALTER TABLE messages ADD COLUMN model TEXT")
+    if not _column_exists(conn, "messages", "tok_per_sec"):
+        conn.execute("ALTER TABLE messages ADD COLUMN tok_per_sec REAL")
     conn.commit()
 
 

@@ -41,6 +41,32 @@ class Settings(BaseSettings):
     consolidate_k: int = 5
     recent_history_turns: int = 6            # nº de mensagens literais recentes no prompt
 
+    # Raiz do projeto (usada pelas ferramentas de ficheiro do agente, com sandbox).
+    project_root: str = str(_PROJECT_ROOT)
+
+    # Modelo de aventura (/aidungeon). Vazio = usar o fallback (já instalado).
+    # Harbinger-24B (~14GB) corre sob demanda; descarrega o qwen3-vl enquanto ativo.
+    # Pull recomendado: ollama pull hf.co/LatitudeGames/Harbinger-24B-GGUF:Q4_K_M
+    adventure_model: str = ""
+    adventure_model_fallback: str = "qwen3-vl:8b"
+
+    # Sampler oficial da Latitude Games para o Harbinger-24B (base Mistral Small 3.1).
+    # ChatML é aplicado automaticamente pelo template embebido no GGUF (via /api/chat).
+    adventure_temperature: float = 0.8
+    adventure_repeat_penalty: float = 1.05
+    adventure_min_p: float = 0.025
+
+    # System message PADRÃO da Latitude Games (verbatim). É a base do Mestre-de-Jogo;
+    # o cenário criado pelo utilizador é anexado a seguir.
+    adventure_system_prompt: str = (
+        "You're a masterful storyteller and gamemaster. Write in second person "
+        "present tense (You are), crafting vivid, engaging narratives with authority "
+        "and confidence."
+    )
+
+    # Pasta com 1 ficheiro JSON por aventura (histórico das histórias).
+    adventures_dir: str = str(_PROJECT_ROOT / "data" / "adventures")
+
     # Base de dados (1 ficheiro)
     db_path: str = str(_PROJECT_ROOT / "data" / "memory.db")
 
