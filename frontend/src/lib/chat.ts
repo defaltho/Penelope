@@ -13,6 +13,8 @@ export interface ChatCallbacks {
 	onToken: (token: string) => void;
 	onDone: (conversationId: number) => void;
 	onError: (message: string) => void;
+	// Eventos de progresso em tempo real (B2): kind ex.: 'web'|'memory'|'thinking'.
+	onStatus?: (kind: string, text: string) => void;
 }
 
 /** Faz o pedido e encaminha cada evento para o callback respetivo. */
@@ -54,50 +56,6 @@ export async function streamChat(
 	}
 
 	await readSSE(res, (block) => dispatch(block, cb), (msg) => cb.onError(msg));
-}
-
-/** Callbacks de um turno de aventura (/adventures/{id}/turn). */
-export interface AdventureCallbacks {
-	onToken: (token: string) => void;
-	onDone: (adventureId: string) => void;
-	onError: (message: string) => void;
-}
-
-/** Faz stream de um turno de aventura (modo Do/Say/Story/Continue). */
-export async function streamAdventureTurn(
-	adventureId: string,
-	input: string,
-	mode: 'do' | 'say' | 'story' | 'continue',
-	cb: AdventureCallbacks,
-	signal?: AbortSignal
-): Promise<void> {
-	let res: Response;
-	try {
-		res = await fetch(`/api/adventures/${adventureId}/turn`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ input, mode }),
-			signal
-		});
-	} catch (e) {
-		cb.onError(`Falha de rede: ${e instanceof Error ? e.message : String(e)}`);
-		return;
-	}
-	if (!res.ok || !res.body) {
-		cb.onError(`HTTP ${res.status}`);
-		return;
-	}
-	await readSSE(
-		res,
-		(block) => {
-			const { event, payload } = parseBlock(block);
-			if (!payload) return;
-			if (event === 'token') cb.onToken(payload.token ?? '');
-			else if (event === 'done') cb.onDone(payload.adventure_id ?? adventureId);
-			else if (event === 'error') cb.onError(payload.error ?? 'erro desconhecido');
-		},
-		(msg) => cb.onError(msg)
-	);
 }
 
 /** Lê o corpo SSE (POST) bloco a bloco, normalizando o CRLF do sse-starlette. */
@@ -150,4 +108,5 @@ function dispatch(block: string, cb: ChatCallbacks): void {
 	if (event === 'token') cb.onToken(payload.token ?? '');
 	else if (event === 'done') cb.onDone(payload.conversation_id);
 	else if (event === 'error') cb.onError(payload.error ?? 'erro desconhecido');
+	else if (event === 'status') cb.onStatus?.(payload.kind ?? '', payload.text ?? '');
 }

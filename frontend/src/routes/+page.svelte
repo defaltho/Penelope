@@ -8,11 +8,9 @@
 	import GalleryPanel from '$lib/components/GalleryPanel.svelte';
 	import SkillsPanel from '$lib/components/SkillsPanel.svelte';
 	import AgentsView from '$lib/views/AgentsView.svelte';
-	import NotesView from '$lib/views/NotesView.svelte';
-	import TasksView from '$lib/views/TasksView.svelte';
+	import WorkspaceView from '$lib/views/WorkspaceView.svelte';
 	import CompareView from '$lib/views/CompareView.svelte';
 	import DocumentsView from '$lib/views/DocumentsView.svelte';
-	import AdventuresView from '$lib/views/AdventuresView.svelte';
 	import SettingsView from '$lib/views/SettingsView.svelte';
 	import Onboarding from '$lib/components/Onboarding.svelte';
 	import { applyTheme, loadTheme, applyAnimation } from '$lib/theme';
@@ -34,8 +32,6 @@
 	let chatConvoId = $state<number | null>(null); // ligado ao ChatView
 	let openConvoId = $state<number | null>(null); // sinal para abrir
 	let newSignal = $state(0); // sinal para nova conversa
-	let openAdventureId = $state<string | null>(null); // sinal para retomar aventura
-
 	onMount(() => {
 		refreshConversations();
 		const th = loadTheme();
@@ -73,14 +69,6 @@
 	function newChat() {
 		newSignal += 1;
 		activeView = 'chat';
-	}
-	function openAdventure(id: string) {
-		// Reatribuir sempre (mesmo id) para forçar o sinal no ChatView.
-		openAdventureId = null;
-		queueMicrotask(() => {
-			openAdventureId = id;
-			activeView = 'chat';
-		});
 	}
 	async function renameConvo(id: number, title: string) {
 		await renameConversation(id, title);
@@ -127,10 +115,8 @@
 			<ChatView
 				{openConvoId}
 				{newSignal}
-				{openAdventureId}
 				bind:conversationId={chatConvoId}
 				onConversationsChanged={refreshConversations}
-				onOpenAdventures={() => (activeView = 'adventures')}
 			/>
 		</div>
 
@@ -138,16 +124,12 @@
 			<MemoryPanel inline />
 		{:else if activeView === 'skills'}
 			<SkillsPanel inline />
-		{:else if activeView === 'notes'}
-			<NotesView />
-		{:else if activeView === 'tasks'}
-			<TasksView />
+		{:else if activeView === 'workspace'}
+			<WorkspaceView />
 		{:else if activeView === 'gallery'}
 			<GalleryPanel inline onOpenConversation={selectConvo} />
 		{:else if activeView === 'documents'}
 			<DocumentsView />
-		{:else if activeView === 'adventures'}
-			<AdventuresView onContinue={openAdventure} />
 		{:else if activeView === 'agents'}
 			<AgentsView />
 		{:else if activeView === 'compare'}

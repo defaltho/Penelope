@@ -26,18 +26,15 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
-import adventure as adv_store
 import ollama_client as oc
 from config import settings
 from db import connect, fts5_available, init_schema
 from memory import MemoryService
 from schemas import (
-    AdventureCreate,
-    AdventurePatch,
-    AdventureTurn,
     AgentRunRequest,
     AgentStep,
     ChatRequest,
+    CompactRequest,
     SkillExtraction,
 )
 
@@ -170,35 +167,12 @@ async def chat(req: ChatRequest):
     num_ctx = _num("num_ctx", settings.num_ctx, int)
     max_tokens = _num("max_tokens", 0, int)
 
-    # System prompt base: por defeito o do Penelope; se vier um override
-    # (ex.: modo /aidungeon, Mestre-de-Jogo) usa-se esse como base.
+    # System prompt base: por defeito o do Penelope; override substitui.
     override = (req.system_override or "").strip()
     system_content = override or settings.base_system_prompt
     system_extra = (cfg.get("system_extra") or "").strip()
     if system_extra:
         system_content += "\n\n" + system_extra
-
-    # Pesquisa web (estilo Odysseus): só com o toggle ligado E internet permitida.
-    if req.web_search and _internet_allowed(conn):
-        try:
-            web = await _web_search(conn, user_text)
-        except Exception as e:  # noqa: BLE001 - nunca rebentar o chat
-            web = []
-            log.warning("pesquisa web no chat falhou: %s", e)
-        if web:
-            block = "\n".join(
-                f"- {r['title']} ({r['url']}): {r['snippet']}" for r in web[:5]
-            )
-            system_content += (
-                "\n\nResultados de pesquisa web (usa-os para responder e cita as fontes "
-                "quando fizer sentido):\n" + block
-            )
-
-    # Recuperar + injetar memória (se ativa E não em modo anónimo)
-    if cfg["memory_enabled"] == "1" and not req.incognito:
-        injection = await memory.retrieve(user_text)
-        if injection:
-            system_content += "\n\n" + injection
 
     # Injetar skills ativas (se ativas nas definições)
     if cfg["skills_enabled"] == "1":
@@ -214,21 +188,60 @@ async def chat(req: ChatRequest):
         history = [{"role": "user", "content": user_text}]
     else:
         history = _recent_history(conn, conversation_id, settings.recent_history_turns)
-    messages = [{"role": "system", "content": system_content}, *history]
 
-    # Anexar a imagem ao último turno do utilizador (só neste pedido).
-    if img_b64:
-        messages[-1] = {**messages[-1], "images": [img_b64]}
+    # A pesquisa web e a recuperação de memória correm DENTRO do event_gen para
+    # emitirem eventos `status` em tempo real (B2: activity lane). Flags pré-calculadas:
+    do_web = bool(req.web_search and _internet_allowed(conn))
+    do_memory = bool(cfg["memory_enabled"] == "1" and not req.incognito)
 
     holder = {"text": "", "tokens": 0, "tps": None}
 
     async def event_gen():
         import time as _time
 
+        nonlocal system_content
+
+        def _status(kind: str, text: str) -> dict:
+            return {"event": "status", "data": json.dumps({"kind": kind, "text": text})}
+
+        # --- Contexto em tempo real (B2: activity lane) ---
+        # Cada fase emite um `status` antes de correr, para a UI mostrar o que se passa.
+        if do_web:
+            yield _status("web", "a pesquisar na web")
+            try:
+                web = await _web_search(conn, user_text)
+            except Exception as e:  # noqa: BLE001 - nunca rebentar o chat
+                web = []
+                log.warning("pesquisa web no chat falhou: %s", e)
+            if web:
+                block = "\n".join(
+                    f"- {r['title']} ({r['url']}): {r['snippet']}" for r in web[:5]
+                )
+                system_content += (
+                    "\n\nResultados de pesquisa web (usa-os para responder e cita as fontes "
+                    "quando fizer sentido):\n" + block
+                )
+        if do_memory:
+            yield _status("memory", "a recuperar memória")
+            try:
+                injection = await memory.retrieve(user_text)
+            except Exception as e:  # noqa: BLE001
+                injection = ""
+                log.warning("retrieve no chat falhou: %s", e)
+            if injection:
+                system_content += "\n\n" + injection
+
+        # Construir as mensagens já com o contexto recolhido.
+        msgs = [{"role": "system", "content": system_content}, *history]
+        if img_b64:
+            msgs[-1] = {**msgs[-1], "images": [img_b64]}
+
+        yield _status("thinking", "a pensar")
+
         started = None
         try:
             async for token in oc.chat_stream(
-                messages,
+                msgs,
                 model=chat_model,
                 num_ctx=num_ctx,
                 temperature=temperature,
@@ -302,219 +315,56 @@ async def chat(req: ChatRequest):
     return EventSourceResponse(event_gen(), background=BackgroundTask(_post_exchange))
 
 
-# ---------- Aventura (/aidungeon, estilo AI Dungeon) ----------
-#
-# O modo aventura corre LIMPO: NÃO injeta memória nem skills da Penelope. Usa só a
-# system message oficial da Latitude Games + o cenário/contexto persistente da própria
-# aventura, com o sampler do Harbinger-24B (temp 0.8, repeat_penalty 1.05, min_p 0.025).
-# Cada história vive num ficheiro (data/adventures/<id>.json); o índice de metadados é
-# arquivado nas settings (chave `adventures`).
 
-_CONTINUE_NUDGE = "Continua a narrativa a partir do último momento, sem repetir."
+@app.post("/chat/compact")
+async def compact_chat(req: CompactRequest):
+    conn = app.state.conn
+    row = conn.execute(
+        "SELECT id FROM conversations WHERE id = ?", (req.conversation_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "conversa não encontrada")
 
+    msgs = conn.execute(
+        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id",
+        (req.conversation_id,),
+    ).fetchall()
+    if not msgs:
+        raise HTTPException(400, "conversa sem mensagens")
 
-def _sync_adventures_index(conn) -> list[dict]:
-    """Reconstrói o índice de aventuras a partir dos ficheiros e arquiva-o nas settings."""
-    index = adv_store.list_index()
+    transcript = "\n".join(f"[{m['role']}] {m['content']}" for m in msgs)
+    cfg = _get_settings(conn)
+    chat_model = cfg["chat_model"]
+
+    summary = await oc.chat_once(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Tu és um assistente que resume conversas. Resume a transcrição abaixo "
+                    "num resumo conciso de 2-3 parágrafos, mantendo todos os factos importantes, "
+                    "decisões tomadas e contexto relevante. Escreve na mesma língua da conversa."
+                ),
+            },
+            {"role": "user", "content": transcript},
+        ],
+        model=chat_model,
+    )
+
     conn.execute(
-        "INSERT INTO app_settings (key, value) VALUES ('adventures', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (json.dumps(index, ensure_ascii=False),),
+        "DELETE FROM messages WHERE conversation_id = ?", (req.conversation_id,)
+    )
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'user', ?)",
+        (req.conversation_id, "[contexto compactado]"),
+    )
+    conn.execute(
+        "INSERT INTO messages (conversation_id, role, content) VALUES (?, 'assistant', ?)",
+        (req.conversation_id, summary),
     )
     conn.commit()
-    return index
 
-
-def _adventure_sampler(cfg: dict) -> dict:
-    def _f(key, default):
-        try:
-            return float(cfg.get(key) or default)
-        except (TypeError, ValueError):
-            return default
-
-    return {
-        "temperature": _f("adventure_temperature", settings.adventure_temperature),
-        "repeat_penalty": _f("adventure_repeat_penalty", settings.adventure_repeat_penalty),
-        "min_p": _f("adventure_min_p", settings.adventure_min_p),
-    }
-
-
-def _resolve_adventure_model(cfg: dict) -> str:
-    """Modelo a usar no jogo: o de aventura se definido, senão o fallback, senão o de chat."""
-    return (
-        (cfg.get("adventure_model") or "").strip()
-        or (cfg.get("adventure_model_fallback") or "").strip()
-        or cfg["chat_model"]
-    )
-
-
-def _mode_frame(text: str, mode: str) -> str:
-    """Enquadra o input do jogador pela convenção de aventura (estilo Wayfarer/AI Dungeon)."""
-    text = (text or "").strip()
-    if mode == "say":
-        return f'> Dizes: "{text}"'
-    if mode == "story":
-        return text  # narração crua: o MJ responde-lhe
-    return f"> {text}"  # do (ação)
-
-
-def _triggered_cards(adv: dict, recent_text: str) -> list[str]:
-    """Story Cards cujas keywords aparecem no contexto recente (world info por gatilho)."""
-    low = recent_text.lower()
-    out = []
-    for card in adv.get("story_cards", []):
-        keys = card.get("keys", [])
-        if any(k and k.lower() in low for k in keys):
-            txt = (card.get("text") or "").strip()
-            if txt:
-                out.append(txt)
-    return out
-
-
-def _build_adventure_messages(adv: dict, *, new_user: str | None) -> list[dict]:
-    """Monta as mensagens do turno: system (Latitude + contexto) + história + novo input."""
-    history = [{"role": t["role"], "content": t["content"]} for t in adv.get("turns", [])]
-
-    # Texto recente para acionar Story Cards (últimos turnos + input).
-    recent = "\n".join(t["content"] for t in adv.get("turns", [])[-6:])
-    if new_user:
-        recent += "\n" + new_user
-
-    parts = [settings.adventure_system_prompt]
-    if adv.get("scenario"):
-        parts.append("Cenário:\n" + adv["scenario"])
-    if adv.get("instructions"):
-        parts.append("Instruções:\n" + adv["instructions"])
-    if adv.get("memory"):
-        parts.append("Memória da história (mantém coerência):\n" + adv["memory"])
-    if adv.get("authors_note"):
-        parts.append("Nota de autor (estilo/foco):\n" + adv["authors_note"])
-    cards = _triggered_cards(adv, recent)
-    if cards:
-        parts.append("Contexto relevante:\n" + "\n".join(f"- {c}" for c in cards))
-    system_content = "\n\n".join(parts)
-
-    messages = [{"role": "system", "content": system_content}, *history]
-    if new_user is not None:
-        messages.append({"role": "user", "content": new_user})
-    return messages
-
-
-@app.get("/adventures")
-async def list_adventures():
-    return adv_store.list_index()
-
-
-@app.post("/adventures")
-async def create_adventure(req: AdventureCreate):
-    conn = app.state.conn
-    cfg = _get_settings(conn)
-    adv = adv_store.create(
-        title=req.title,
-        scenario=req.scenario,
-        instructions=req.instructions,
-        model=_resolve_adventure_model(cfg),
-        sampler=_adventure_sampler(cfg),
-    )
-    _sync_adventures_index(conn)
-    return adv
-
-
-@app.get("/adventures/{adv_id}")
-async def get_adventure(adv_id: str):
-    try:
-        adv = adv_store.load(adv_id)
-    except ValueError:
-        raise HTTPException(400, "id inválido")
-    if adv is None:
-        raise HTTPException(404, "aventura não encontrada")
-    return adv
-
-
-@app.patch("/adventures/{adv_id}")
-async def patch_adventure(adv_id: str, body: AdventurePatch):
-    conn = app.state.conn
-    fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    try:
-        adv = adv_store.patch(adv_id, fields)
-    except ValueError:
-        raise HTTPException(400, "id inválido")
-    if adv is None:
-        raise HTTPException(404, "aventura não encontrada")
-    _sync_adventures_index(conn)
-    return adv
-
-
-@app.delete("/adventures/{adv_id}")
-async def delete_adventure(adv_id: str):
-    conn = app.state.conn
-    try:
-        ok = adv_store.delete(adv_id)
-    except ValueError:
-        raise HTTPException(400, "id inválido")
-    if not ok:
-        raise HTTPException(404, "aventura não encontrada")
-    _sync_adventures_index(conn)
-    return {"ok": True}
-
-
-@app.post("/adventures/{adv_id}/turn")
-async def adventure_turn(adv_id: str, req: AdventureTurn):
-    conn = app.state.conn
-    try:
-        adv = adv_store.load(adv_id)
-    except ValueError:
-        raise HTTPException(400, "id inválido")
-    if adv is None:
-        raise HTTPException(404, "aventura não encontrada")
-
-    cfg = _get_settings(conn)
-    model = adv.get("model") or _resolve_adventure_model(cfg)
-    sampler = adv.get("sampler") or _adventure_sampler(cfg)
-
-    mode = req.mode.value
-    is_continue = mode == "continue"
-    # O input enquadrado é gravado como turno; em continue não há turno do jogador.
-    saved_user = None if is_continue else _mode_frame(req.input, mode)
-    # Em continue enviamos um "empurrão" transitório (não gravado) para o modelo gerar.
-    sent_user = _CONTINUE_NUDGE if is_continue else saved_user
-
-    messages = _build_adventure_messages(adv, new_user=sent_user)
-    holder = {"text": ""}
-
-    async def event_gen():
-        import time as _time
-
-        started = None
-        try:
-            async for token in oc.chat_stream(
-                messages,
-                model=model,
-                temperature=sampler.get("temperature"),
-                repeat_penalty=sampler.get("repeat_penalty"),
-                min_p=sampler.get("min_p"),
-            ):
-                if started is None:
-                    started = _time.monotonic()
-                holder["text"] += token
-                yield {"event": "token", "data": json.dumps({"token": token})}
-        except oc.OllamaError as e:
-            log.error("erro de aventura: %s", e)
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
-            return
-
-        # Persistir os turnos no ficheiro da aventura + atualizar o índice.
-        if saved_user is not None:
-            adv_store.append_turn(adv_id, role="user", content=saved_user, mode=mode)
-        adv_store.append_turn(adv_id, role="assistant", content=holder["text"], mode=mode)
-        _sync_adventures_index(conn)
-
-        yield {
-            "event": "done",
-            "data": json.dumps({"adventure_id": adv_id, "model": model}),
-        }
-
-    return EventSourceResponse(event_gen())
+    return {"summary": summary, "conversation_id": req.conversation_id}
 
 
 # ---------- Imagem (visão geral, Stage 2) ----------
@@ -751,13 +601,39 @@ async def import_facts(body: dict):
     return {"added": added}
 
 
+@app.get("/memory/facts/archived")
+async def list_archived_facts():
+    """Factos arquivados (recuperáveis). Para o separador 'Arquivados' (A3)."""
+    memory: MemoryService = app.state.memory
+    return [dict(r) for r in memory.list_archived()]
+
+
 @app.delete("/memory/facts/{fact_id}")
-async def delete_fact(fact_id: int):
+async def archive_fact(fact_id: int):
+    """Arquiva (soft-delete recuperável). É a ação por defeito do botão de apagar."""
+    memory: MemoryService = app.state.memory
+    memory.archive_fact(fact_id)  # idempotente: já-arquivado/inexistente não rebenta
+    return {"archived": fact_id}
+
+
+@app.post("/memory/facts/{fact_id}/restore")
+async def restore_fact(fact_id: int):
+    """Restaura um facto arquivado (re-embebe e volta ao KNN)."""
+    memory: MemoryService = app.state.memory
+    ok = await memory.restore_fact(fact_id)
+    if not ok:
+        raise HTTPException(404, f"facto {fact_id} não está arquivado")
+    return {"restored": fact_id}
+
+
+@app.delete("/memory/facts/{fact_id}/purge")
+async def purge_fact(fact_id: int):
+    """Apaga DEFINITIVAMENTE um facto (ação explícita, não recuperável)."""
     conn = app.state.conn
-    conn.execute("UPDATE semantic_facts SET is_deleted = 1 WHERE id = ?", (fact_id,))
     conn.execute("DELETE FROM fact_vectors WHERE fact_id = ?", (fact_id,))
+    conn.execute("DELETE FROM semantic_facts WHERE id = ?", (fact_id,))
     conn.commit()
-    return {"deleted": fact_id}
+    return {"purged": fact_id}
 
 
 # ---------- Pesquisa web (estilo Odysseus: DuckDuckGo / SearXNG) ----------
@@ -891,6 +767,41 @@ def _disabled_tools(conn) -> set[str]:
         return set(json.loads(raw))
     except (ValueError, TypeError):
         return set(_DEFAULT_DISABLED_TOOLS)
+
+
+def _auto_approved(conn) -> set[str]:
+    """Ferramentas perigosas que o utilizador marcou como 'permitir sempre' (B8).
+    Persistido em app_settings; vazio por defeito (cada chamada pede aprovação)."""
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = 'tools_auto_approved'"
+    ).fetchone()
+    if not row:
+        return set()
+    try:
+        return set(json.loads(row[0]))
+    except (ValueError, TypeError):
+        return set()
+
+
+def _add_auto_approved(conn, name: str) -> None:
+    s = _auto_approved(conn)
+    s.add(name)
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('tools_auto_approved', ?)",
+        (json.dumps(sorted(s)),),
+    )
+    conn.commit()
+
+
+def _needs_approval(conn, name: str, granted: set[str]) -> bool:
+    """Uma ferramenta perigosa ATIVADA precisa de aprovação inline, exceto se já
+    concedida nesta sessão (granted) ou marcada como 'sempre' (auto_approved)."""
+    spec = next((t for t in _TOOL_REGISTRY if t["name"] == name), None)
+    if not spec or not spec["dangerous"]:
+        return False
+    if name in _disabled_tools(conn):
+        return False  # desativada: fica escondida/bloqueada, não há o que aprovar
+    return name not in granted and name not in _auto_approved(conn)
 
 
 def _tool_allowed(conn, name: str) -> tuple[bool, str]:
@@ -1168,21 +1079,50 @@ async def agent_tools():
     ]
 
 
+_AGENT_MAX_STEPS = 5
+
+
 @app.post("/agent/run")
 async def agent_run(req: AgentRunRequest):
+    """Loop do agente, RETOMÁVEL para aprovação inline de tools perigosas (B8).
+
+    Fluxo: corre passos até concluir OU até propor uma ferramenta perigosa ativada
+    que ainda não foi aprovada. Nesse caso devolve `pending` (a UI mostra o prompt
+    permitir/negar) + `state` (progresso). A UI volta a chamar este endpoint com
+    `decision` + `state` para retomar.
+    """
     conn = app.state.conn
     memory: MemoryService = app.state.memory
-    task = req.task.strip()
-    if not task:
-        raise HTTPException(400, "tarefa vazia")
 
-    convo = [f"Tarefa: {task}"]
-    steps: list[dict] = []
-    final: str | None = None
-    MAX_STEPS = 5
+    # Estado: novo arranque vs retoma de uma aprovação.
+    if req.state:
+        convo: list[str] = list(req.state.get("convo", []))
+        steps: list[dict] = list(req.state.get("steps", []))
+        granted: set[str] = set(req.state.get("granted", []))
+    else:
+        task = (req.task or "").strip()
+        if not task:
+            raise HTTPException(400, "tarefa vazia")
+        convo, steps, granted = [f"Tarefa: {task}"], [], set()
+
+    # Resolver uma ferramenta pendente segundo a decisão do utilizador.
+    if req.decision and req.pending_tool:
+        tool, args = req.pending_tool, (req.pending_args or {})
+        if req.decision == "deny":
+            obs = "(execução negada pelo utilizador)"
+        else:
+            if req.decision in ("allow_session", "allow_always"):
+                granted.add(tool)
+            if req.decision == "allow_always":
+                _add_auto_approved(conn, tool)
+            obs = await _agent_tool(conn, memory, tool, args)
+        steps.append({"thought": req.pending_thought, "tool": tool, "args": args, "observation": obs})
+        convo.append(f"Ação: {tool}({args}) -> {obs}")
 
     agent_system = _agent_system(conn)
-    for _ in range(MAX_STEPS):
+    final: str | None = None
+
+    while len(steps) < _AGENT_MAX_STEPS:
         messages = [
             {"role": "system", "content": agent_system},
             {"role": "user", "content": "\n".join(convo) + "\n\nDecide o próximo passo (JSON)."},
@@ -1202,6 +1142,19 @@ async def agent_run(req: AgentRunRequest):
             final = step.thought or "(sem ação)"
             break
 
+        # Ferramenta perigosa ativada sem aprovação: PAUSA e pede confirmação (B8).
+        if _needs_approval(conn, step.tool, granted):
+            return {
+                "steps": steps,
+                "final": None,
+                "pending": {
+                    "tool": step.tool,
+                    "args": step.args or {},
+                    "thought": step.thought,
+                },
+                "state": {"convo": convo, "steps": steps, "granted": sorted(granted)},
+            }
+
         obs = await _agent_tool(conn, memory, step.tool, step.args or {})
         steps.append(
             {"thought": step.thought, "tool": step.tool, "args": step.args or {}, "observation": obs}
@@ -1210,7 +1163,7 @@ async def agent_run(req: AgentRunRequest):
 
     if final is None:
         final = "(atingi o limite de passos sem concluir a tarefa)"
-    return {"steps": steps, "final": final}
+    return {"steps": steps, "final": final, "pending": None}
 
 
 # ---------- Skills (instruções reutilizáveis) ----------
@@ -1467,15 +1420,6 @@ def _get_settings(conn) -> dict:
         "search_url": "",  # instância SearXNG (vazio = usar DuckDuckGo)
         # Agent tools: lista JSON das ferramentas DESATIVADAS (perigosas off por defeito).
         "tools_disabled": json.dumps(_DEFAULT_DISABLED_TOOLS),
-        # Jogo /aidungeon: modelo de aventura (vazio = usar o fallback já instalado).
-        "adventure_model": settings.adventure_model,
-        "adventure_model_fallback": settings.adventure_model_fallback,
-        # Sampler oficial do Harbinger-24B (Latitude Games).
-        "adventure_temperature": str(settings.adventure_temperature),
-        "adventure_repeat_penalty": str(settings.adventure_repeat_penalty),
-        "adventure_min_p": str(settings.adventure_min_p),
-        # Índice (metadados) das sessões de aventura, arquivado nas settings.
-        "adventures": "[]",
     }
     for r in conn.execute("SELECT key, value FROM app_settings").fetchall():
         out[r["key"]] = r["value"]
@@ -1539,12 +1483,6 @@ async def get_settings():
         "search_results": _i("search_results", 5),
         "search_url": s["search_url"],
         "tools_disabled": s["tools_disabled"],
-        "adventure_model": s["adventure_model"],
-        "adventure_model_fallback": s["adventure_model_fallback"],
-        "adventure_temperature": _f("adventure_temperature", settings.adventure_temperature),
-        "adventure_repeat_penalty": _f("adventure_repeat_penalty", settings.adventure_repeat_penalty),
-        "adventure_min_p": _f("adventure_min_p", settings.adventure_min_p),
-        "adventures": s["adventures"],
     }
 
 
@@ -1563,11 +1501,6 @@ async def put_settings(body: dict):
         "search_results",
         "search_url",
         "tools_disabled",
-        "adventure_model",
-        "adventure_model_fallback",
-        "adventure_temperature",
-        "adventure_repeat_penalty",
-        "adventure_min_p",
     } | _BOOL_KEYS
     for key in allowed & body.keys():
         val = body[key]
@@ -1586,21 +1519,6 @@ async def put_settings(body: dict):
         elif key == "max_tokens":
             try:
                 val = min(8192, max(0, int(float(val))))
-            except (TypeError, ValueError):
-                continue
-        elif key == "adventure_temperature":
-            try:
-                val = min(2.0, max(0.0, float(val)))
-            except (TypeError, ValueError):
-                continue
-        elif key == "adventure_repeat_penalty":
-            try:
-                val = min(2.0, max(1.0, float(val)))
-            except (TypeError, ValueError):
-                continue
-        elif key == "adventure_min_p":
-            try:
-                val = min(1.0, max(0.0, float(val)))
             except (TypeError, ValueError):
                 continue
         elif key == "tools_disabled":

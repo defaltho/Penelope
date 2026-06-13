@@ -52,9 +52,8 @@ async def chat_stream(
 ) -> AsyncIterator[str]:
     """Faz stream da resposta do assistente, token a token, via /api/chat.
 
-    `repeat_penalty`/`min_p` só são enviados quando definidos (usados pelo modo
-    /aidungeon com o sampler oficial do Harbinger-24B). O formato do prompt (ex.:
-    ChatML do Harbinger) é tratado pelo template embebido no modelo, não aqui.
+    `repeat_penalty`/`min_p` só são enviados quando definidos. O formato do prompt
+    é tratado pelo template embebido no modelo, não aqui.
     """
     options = {
         "num_ctx": num_ctx or settings.num_ctx,

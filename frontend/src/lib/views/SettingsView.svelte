@@ -27,7 +27,6 @@
 		{ id: 'account', icon: 'user', label: 'Conta' },
 		{ id: 'ia', icon: 'brain', label: 'IA' },
 		{ id: 'tools', icon: 'zap', label: 'Agent Tools' },
-		{ id: 'game', icon: 'bot', label: 'AI Dungeon' },
 		{ id: 'appearance', icon: 'palette', label: 'Aparência' },
 		{ id: 'privacy', icon: 'eye', label: 'Privacidade' },
 		{ id: 'data', icon: 'database', label: 'Dados' }
@@ -87,14 +86,6 @@
 				error = 'falha a guardar';
 			}
 		}, 300);
-	}
-
-	function adventuresCount(): number {
-		try {
-			return JSON.parse(settings?.adventures || '[]').length;
-		} catch {
-			return 0;
-		}
 	}
 
 	function toggle(key: keyof AppSettings) {
@@ -269,57 +260,6 @@
 								aria-label={t.name}><span class="knob"></span></button>
 						</div>
 					{/each}
-				</div>
-
-			{:else if section === 'game'}
-				<div class="card">
-					<h3 class="card-title"><Icon name="dice" size={15} /> AI Dungeon (/aidungeon)</h3>
-					<p class="hint">no chat, escreve <code>/aidungeon</code> para entrar no modo aventura (estilo AI Dungeon: modos Fazer/Dizer/História, Continuar, Repetir, Retroceder). As histórias ficam guardadas na aba <strong>Aventuras</strong>.</p>
-					<div class="field">
-						<label for="advmodel">Modelo de aventura</label>
-						<p class="hint">
-							modelo Ollama usado no jogo. Recomendado: <strong>Harbinger-24B</strong> (Latitude Games, base Mistral Small 3.1, ~14GB). Puxa-o com:<br />
-							<code>ollama pull {settings.adventure_model || 'hf.co/LatitudeGames/Harbinger-24B-GGUF:Q4_K_M'}</code><br />
-							vazio = usa o modelo de reserva abaixo (já instalado).
-						</p>
-						<input id="advmodel" placeholder="hf.co/LatitudeGames/Harbinger-24B-GGUF:Q4_K_M" bind:value={settings.adventure_model} oninput={persist} />
-					</div>
-					<div class="field">
-						<label for="advfb">Modelo de reserva</label>
-						<p class="hint">usado se o de aventura não estiver instalado (corre folgado no teu hardware).</p>
-						<select id="advfb" bind:value={settings.adventure_model_fallback} onchange={persist}>
-							{#each models as m}<option value={m}>{m}</option>{/each}
-							{#if settings.adventure_model_fallback && !models.includes(settings.adventure_model_fallback)}
-								<option value={settings.adventure_model_fallback}>{settings.adventure_model_fallback}</option>
-							{/if}
-						</select>
-					</div>
-					<p class="hint">nota: o Harbinger-24B compete com o qwen3-vl pela memória; o Ollama troca-os sob demanda, por isso o primeiro token pode demorar.</p>
-				</div>
-
-				<div class="card">
-					<h3 class="card-title"><Icon name="zap" size={15} /> Sampler do Harbinger</h3>
-					<p class="hint">valores oficiais da Latitude Games para este modelo. ChatML e a system message do storyteller são aplicados automaticamente.</p>
-					<div class="field">
-						<label for="advtemp">Temperatura ({settings.adventure_temperature})</label>
-						<input id="advtemp" type="range" min="0" max="2" step="0.05" bind:value={settings.adventure_temperature} oninput={persist} />
-					</div>
-					<div class="field">
-						<label for="advrep">Repetition Penalty ({settings.adventure_repeat_penalty})</label>
-						<input id="advrep" type="range" min="1" max="1.5" step="0.01" bind:value={settings.adventure_repeat_penalty} oninput={persist} />
-					</div>
-					<div class="field">
-						<label for="advminp">Min-P ({settings.adventure_min_p})</label>
-						<input id="advminp" type="range" min="0" max="0.2" step="0.005" bind:value={settings.adventure_min_p} oninput={persist} />
-					</div>
-				</div>
-
-				<div class="card">
-					<h3 class="card-title"><Icon name="database" size={15} /> Sessões guardadas</h3>
-					<p class="hint">
-						{adventuresCount()} aventura(s) arquivada(s). Os metadados ficam nas definições; cada história
-						num ficheiro próprio em <code>data/adventures/</code>. Vê e retoma na aba <strong>Aventuras</strong>.
-					</p>
 				</div>
 
 			{:else if section === 'appearance'}

@@ -48,6 +48,13 @@ export const renameConversation = (id: number, title: string) =>
 export const deleteConversation = (id: number) =>
 	fetch(`/api/conversations/${id}`, { method: 'DELETE' }).then(json);
 
+export const compactChat = (conversationId: number) =>
+	fetch('/api/chat/compact', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ conversation_id: conversationId })
+	}).then(json<{ summary: string; conversation_id: number }>);
+
 // ---- Memória ----
 
 export const listFacts = (q?: string) =>
@@ -60,8 +67,18 @@ export const editFact = (id: number, text: string) =>
 		body: JSON.stringify({ text })
 	}).then(json);
 
+// Apagar = arquivar (recuperável). O purgar definitivo é uma ação separada.
 export const deleteFact = (id: number) =>
 	fetch(`/api/memory/facts/${id}`, { method: 'DELETE' }).then(json);
+
+export const listArchivedFacts = () =>
+	fetch('/api/memory/facts/archived').then(json<Fact[]>);
+
+export const restoreFact = (id: number) =>
+	fetch(`/api/memory/facts/${id}/restore`, { method: 'POST' }).then(json);
+
+export const purgeFact = (id: number) =>
+	fetch(`/api/memory/facts/${id}/purge`, { method: 'DELETE' }).then(json);
 
 export const exportFacts = () =>
 	fetch('/api/memory/export').then(json<{ text: string; fact_type: string }[]>);
@@ -110,12 +127,6 @@ export interface AppSettings {
 	search_results: number;
 	search_url: string;
 	tools_disabled: string;
-	adventure_model: string;
-	adventure_model_fallback: string;
-	adventure_temperature: number;
-	adventure_repeat_penalty: number;
-	adventure_min_p: number;
-	adventures: string;
 }
 
 export interface WebResult {
@@ -219,12 +230,44 @@ export interface AgentStep {
 	observation: string | null;
 }
 
+// Aprovação inline de ferramentas perigosas (B8).
+export interface AgentPending {
+	tool: string;
+	args: Record<string, unknown>;
+	thought: string;
+}
+export interface AgentRunResult {
+	steps: AgentStep[];
+	final: string | null;
+	pending?: AgentPending | null;
+	state?: Record<string, unknown>;
+}
+export type AgentDecision = 'allow_once' | 'allow_session' | 'allow_always' | 'deny';
+
 export const agentRun = (task: string) =>
 	fetch('/api/agent/run', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ task })
-	}).then(json<{ steps: AgentStep[]; final: string }>);
+	}).then(json<AgentRunResult>);
+
+// Retoma o loop após o utilizador decidir sobre uma ferramenta pendente.
+export const agentResume = (
+	state: Record<string, unknown>,
+	pending: AgentPending,
+	decision: AgentDecision
+) =>
+	fetch('/api/agent/run', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			state,
+			decision,
+			pending_tool: pending.tool,
+			pending_args: pending.args,
+			pending_thought: pending.thought
+		})
+	}).then(json<AgentRunResult>);
 
 export interface AgentTool {
 	name: string;
@@ -235,73 +278,6 @@ export interface AgentTool {
 }
 
 export const listAgentTools = () => fetch('/api/agent/tools').then(json<AgentTool[]>);
-
-// ---- Aventuras (/aidungeon, estilo AI Dungeon) ----
-
-export type AdventureMode = 'do' | 'say' | 'story' | 'continue';
-
-export interface AdventureTurnEntry {
-	role: 'user' | 'assistant';
-	mode: AdventureMode | null;
-	content: string;
-	ts: string;
-}
-
-export interface StoryCard {
-	keys: string[];
-	text: string;
-}
-
-export interface Adventure {
-	id: string;
-	title: string;
-	scenario: string;
-	instructions: string;
-	memory: string;
-	authors_note: string;
-	story_cards: StoryCard[];
-	model: string;
-	sampler: { temperature: number; repeat_penalty: number; min_p: number };
-	turns: AdventureTurnEntry[];
-	created_at: string;
-	updated_at: string;
-}
-
-export interface AdventureMeta {
-	id: string;
-	title: string;
-	scenario_summary: string;
-	model: string;
-	turn_count: number;
-	created_at: string;
-	updated_at: string;
-}
-
-export const listAdventures = () => fetch('/api/adventures').then(json<AdventureMeta[]>);
-
-export const getAdventure = (id: string) =>
-	fetch(`/api/adventures/${id}`).then(json<Adventure>);
-
-export const createAdventure = (body: {
-	title?: string;
-	scenario?: string;
-	instructions?: string;
-}) =>
-	fetch('/api/adventures', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	}).then(json<Adventure>);
-
-export const patchAdventure = (id: string, patch: Partial<Adventure>) =>
-	fetch(`/api/adventures/${id}`, {
-		method: 'PATCH',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(patch)
-	}).then(json<Adventure>);
-
-export const deleteAdventure = (id: string) =>
-	fetch(`/api/adventures/${id}`, { method: 'DELETE' }).then(json);
 
 // ---- Notas ----
 

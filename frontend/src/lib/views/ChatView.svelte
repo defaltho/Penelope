@@ -1,20 +1,21 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { streamChat, streamAdventureTurn } from '$lib/chat';
+	import { streamChat } from '$lib/chat';
+	import { StreamBuffer } from '$lib/stream-buffer';
 	import Icon from '$lib/components/Icon.svelte';
 	import ModelBadge from '$lib/components/ModelBadge.svelte';
-	import AdventureSetup from '$lib/components/AdventureSetup.svelte';
+	import Spinner from '$lib/components/Spinner.svelte';
+	import ActivityLane from '$lib/components/ActivityLane.svelte';
+	import ThinkingPanel from '$lib/components/ThinkingPanel.svelte';
+	import Markdown from '$lib/components/Markdown.svelte';
+	import { sanitizePartial } from '$lib/markdown';
+	import { notify, requestPermission } from '$lib/notifications';
 	import {
 		getMessages,
 		listModels,
 		getSettings,
 		imageUrl,
-		createAdventure,
-		getAdventure,
-		patchAdventure,
-		type Adventure,
-		type AdventureMode,
-		type AdventureTurnEntry
+		compactChat,
 	} from '$lib/api';
 	import {
 		matchCommands,
@@ -27,22 +28,19 @@
 		openConvoId = null,
 		conversationId = $bindable(null),
 		newSignal = 0,
-		openAdventureId = null,
 		onConversationsChanged = () => {},
-		onOpenAdventures = () => {}
 	}: {
 		openConvoId?: number | null;
 		conversationId?: number | null;
 		newSignal?: number;
-		openAdventureId?: string | null;
 		onConversationsChanged?: () => void;
-		onOpenAdventures?: () => void;
 	} = $props();
 
 	interface Msg {
 		role: 'user' | 'assistant';
 		content: string;
 		image?: string;
+		file?: { name: string };
 		model?: string;
 		tokPerSec?: number;
 	}
@@ -52,6 +50,23 @@
 	let streaming = $state(false);
 	let errorMsg = $state<string | null>(null);
 	let pendingImage = $state<string | null>(null);
+	// Ficheiro de texto/código anexado (lido como texto, juntado ao contexto).
+	let pendingFile = $state<{ name: string; content: string } | null>(null);
+	const MAX_FILE_CHARS = 200_000; // ~200KB de texto, para não estourar o contexto
+	// Extensões de texto/código aceites (além de qualquer image/*).
+	const TEXT_EXTS = [
+		'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'yaml', 'yml',
+		'toml', 'ini', 'env', 'log', 'html', 'css', 'scss', 'js', 'ts', 'jsx', 'tsx',
+		'svelte', 'vue', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'cs', 'php',
+		'sh', 'bash', 'zsh', 'sql', 'r', 'lua', 'kt', 'swift', 'dart', 'gitignore'
+	];
+	const FILE_ACCEPT = 'image/*,' + TEXT_EXTS.map((e) => '.' + e).join(',') + ',text/*';
+	// Fase atual do turno em streaming (B2: activity lane).
+	let activity = $state<{ kind: string; text: string } | null>(null);
+	// Composer (B6): fila de mensagens enquanto ocupado + histórico de envios.
+	let msgQueue = $state<string[]>([]);
+	let inputHistory = $state<string[]>([]);
+	let histIdx = $state(-1); // -1 = a escrever (não a navegar o histórico)
 
 	let models = $state<string[]>([]);
 	let selectedModel = $state('');
@@ -64,29 +79,22 @@
 	let uiWelcome = $state(true);
 	let uiThinking = $state(false);
 	let uiTextEmojis = $state(false);
+	let dragging = $state(false);
 
-	// Modo aventura (/aidungeon, estilo AI Dungeon) + slash-commands.
-	let adventureMode = $state(false);
-	let adventureId = $state<string | null>(null);
-	let advTurns = $state<AdventureTurnEntry[]>([]); // espelho dos turnos do backend
-	let advInfo = $state<{
-		title: string;
-		scenario: string;
-		memory: string;
-		authors_note: string;
-		model: string;
-	} | null>(null);
-	let inputMode = $state<'do' | 'say' | 'story'>('do'); // Do/Say/Story
-	let redoStack = $state<AdventureTurnEntry[][]>([]); // para /refazer
-	let setupOpen = $state(false); // modal Nova/Continuar
-	let setupStage = $state<'world' | 'hero' | null>(null); // perguntas híbridas no chat
-	let setupWorld = $state('');
-	let adventureModel = $state('');
-	let adventureFallback = $state('');
 	let slashIndex = $state(0);
 	let slashHidden = $state(false);
-	const slashMatches = $derived(matchCommands(input, adventureMode));
+	const slashMatches = $derived(matchCommands(input));
 	const slashMenuOpen = $derived(!slashHidden && slashMatches.length > 0);
+	const groupedSlash = $derived.by(() => {
+		const groups: { cat: string; cmds: typeof slashMatches }[] = [];
+		const seen = new Set<string>();
+		for (const c of slashMatches) {
+			const cat = c.category || '';
+			if (!seen.has(cat)) { seen.add(cat); groups.push({ cat, cmds: [] }); }
+			groups.find(g => g.cat === cat)!.cmds.push(c);
+		}
+		return groups;
+	});
 	$effect(() => {
 		// Reset do índice destacado sempre que a lista de sugestões muda.
 		slashMatches.length;
@@ -95,9 +103,24 @@
 
 	const EMOJI_RE =
 		/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}]/gu;
-	function displayContent(c: string): string {
-		let out = c;
-		if (!uiThinking) out = out.replace(/<think>[\s\S]*?<\/think>/gi, '').trimStart();
+
+	// Separa o raciocínio (<think>…</think>, possivelmente ainda aberto durante o
+	// streaming) da resposta visível. `thinking` = bloco <think> ainda sem fecho.
+	function parseAssistant(c: string): { think: string; answer: string; thinking: boolean } {
+		const open = c.indexOf('<think>');
+		if (open === -1) return { think: '', answer: c, thinking: false };
+		const close = c.indexOf('</think>');
+		if (close === -1) {
+			// Em streaming: o <think> abriu mas ainda não fechou -> tudo é raciocínio.
+			return { think: c.slice(open + 7), answer: '', thinking: true };
+		}
+		const think = c.slice(open + 7, close);
+		const answer = c.slice(0, open) + c.slice(close + 8);
+		return { think, answer, thinking: false };
+	}
+
+	function displayAnswer(c: string): string {
+		let out = c.trimStart();
 		if (uiTextEmojis) out = out.replace(EMOJI_RE, '').replace(/\s{2,}/g, ' ');
 		return out;
 	}
@@ -115,6 +138,14 @@
 			Math.round((messages.reduce((n, m) => n + (m.content?.length || 0), 0) / 4 / NUM_CTX) * 100)
 		)
 	);
+	// Status bar (B5): velocidade do último turno + saúde do Ollama (modelos carregados).
+	const lastTps = $derived.by(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].role === 'assistant' && messages[i].tokPerSec) return messages[i].tokPerSec!;
+		}
+		return null;
+	});
+	const ollamaOnline = $derived(models.length > 0);
 
 	let lastOpened = $state<number | null>(null);
 	$effect(() => {
@@ -132,14 +163,6 @@
 		}
 	});
 
-	let lastAdv = $state<string | null>(null);
-	$effect(() => {
-		if (openAdventureId && openAdventureId !== lastAdv) {
-			lastAdv = openAdventureId;
-			continueAdventure(openAdventureId);
-		}
-	});
-
 	onMount(async () => {
 		try {
 			const [mdls, settings] = await Promise.all([
@@ -153,11 +176,10 @@
 			uiTextEmojis = settings.ui_text_emojis;
 			internetOn = settings.internet_enabled;
 			if (!internetOn) webSearch = false;
-			adventureModel = settings.adventure_model || '';
-			adventureFallback = settings.adventure_model_fallback || '';
 		} catch (e) {
 			console.error('falha a obter modelos', e);
 		}
+		requestPermission();
 	});
 
 	async function loadConversation(id: number) {
@@ -192,49 +214,95 @@
 		textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
 	}
 
+	function processFile(file: File) {
+		errorMsg = null;
+		const ext = (file.name.split('.').pop() || '').toLowerCase();
+		const isText = file.type.startsWith('text/') || TEXT_EXTS.includes(ext);
+		if (file.type.startsWith('image/')) {
+			const reader = new FileReader();
+			reader.onload = () => {
+				pendingImage = reader.result as string;
+				pendingFile = null;
+			};
+			reader.readAsDataURL(file);
+		} else if (isText) {
+			const reader = new FileReader();
+			reader.onload = () => {
+				let content = (reader.result as string) || '';
+				if (content.length > MAX_FILE_CHARS) {
+					content = content.slice(0, MAX_FILE_CHARS) + '\n…(ficheiro truncado)';
+				}
+				pendingFile = { name: file.name, content };
+				pendingImage = null;
+			};
+			reader.readAsText(file);
+		} else {
+			errorMsg = `formato não suportado: "${file.name}". Usa uma imagem ou um ficheiro de texto/código.`;
+		}
+	}
+
 	function onPickFile(e: Event) {
 		const file = (e.target as HTMLInputElement).files?.[0];
 		if (!file) return;
-		if (!file.type.startsWith('image/')) {
-			errorMsg = 'só são suportadas imagens';
-			return;
-		}
-		const reader = new FileReader();
-		reader.onload = () => (pendingImage = reader.result as string);
-		reader.readAsDataURL(file);
 		fileInput.value = '';
+		processFile(file);
 	}
 
 	async function send(textOverride?: string, forceWeb = false) {
 		const text = (textOverride ?? input).trim();
 		const image = textOverride ? null : pendingImage;
-		if ((!text && !image) || streaming) return;
+		const file = textOverride ? null : pendingFile;
+		if ((!text && !image && !file) || streaming) return;
 
 		const useWeb = (forceWeb || webSearch) && internetOn;
 
+		// O modelo recebe o conteúdo do ficheiro junto ao texto; a UI mostra só um chip.
+		const ext = file ? (file.name.split('.').pop() || '').toLowerCase() : '';
+		const modelText = file
+			? `Ficheiro anexado "${file.name}":\n\`\`\`${ext}\n${file.content}\n\`\`\`\n\n${text}`.trim()
+			: text;
+
 		errorMsg = null;
-		messages.push({ role: 'user', content: text, image: image ?? undefined });
+		messages.push({
+			role: 'user',
+			content: text,
+			image: image ?? undefined,
+			file: file ? { name: file.name } : undefined
+		});
 		if (!textOverride) input = '';
 		pendingImage = null;
+		pendingFile = null;
 		autoGrow();
 
 		const idx = messages.push({ role: 'assistant', content: '', model: selectedModel }) - 1;
 		streaming = true;
 		let tokens = 0;
 		let startedAt = 0;
+		// Buffer de fluidez (B1): aplica os tokens ao render de forma suave via RAF.
+		const buf = new StreamBuffer((chunk) => {
+			messages[idx].content += chunk;
+			scrollToBottom();
+		});
+		activity = { kind: 'thinking', text: '' };
 		await scrollToBottom();
 
 		await streamChat(
-			text,
+			modelText,
 			conversationId,
 			{
-				onToken: (t) => {
-					if (startedAt === 0) startedAt = performance.now();
-					tokens += 1;
-					messages[idx].content += t;
+				onStatus: (kind, statusText) => {
+					activity = { kind, text: statusText };
 					scrollToBottom();
 				},
+				onToken: (t) => {
+					if (startedAt === 0) startedAt = performance.now();
+					activity = null; // o primeiro token termina a fase de preparação
+					tokens += 1;
+					buf.push(t);
+				},
 				onDone: (id) => {
+					buf.flush();
+					activity = null;
 					streaming = false;
 					const secs = startedAt ? (performance.now() - startedAt) / 1000 : 0;
 					if (secs > 0 && tokens > 1) messages[idx].tokPerSec = tokens / secs;
@@ -243,8 +311,14 @@
 						conversationId = id;
 						onConversationsChanged();
 					}
+					notify('Penelope', 'Resposta pronta.');
+					// Drenar a fila do composer (B6): envia a próxima mensagem em espera.
+					const next = msgQueue.shift();
+					if (next) send(next);
 				},
 				onError: (msg) => {
+					buf.stop();
+					activity = null;
 					errorMsg = msg;
 					streaming = false;
 					if (messages[idx]?.content === '') messages.splice(idx, 1);
@@ -265,22 +339,8 @@
 		errorMsg = null;
 		input = '';
 		pendingImage = null;
-		exitAdventureState();
 		autoGrow();
 		textarea?.focus();
-	}
-
-	/** Repõe o estado interno do modo aventura (sem mensagem). */
-	function exitAdventureState() {
-		adventureMode = false;
-		adventureId = null;
-		advTurns = [];
-		advInfo = null;
-		redoStack = [];
-		setupOpen = false;
-		setupStage = null;
-		setupWorld = '';
-		inputMode = 'do';
 	}
 
 	function onComposerInput() {
@@ -312,6 +372,23 @@
 				return;
 			}
 		}
+		// Histórico de envios (B6): Up/Down quando não se está a navegar o slash menu
+		// e o composer está vazio (ou já em navegação). Não interfere com multiline.
+		if (!slashMenuOpen && inputHistory.length && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+			const navigating = histIdx >= 0;
+			if (e.key === 'ArrowUp' && (input === '' || navigating)) {
+				e.preventDefault();
+				histIdx = Math.min(histIdx + 1, inputHistory.length - 1);
+				input = inputHistory[inputHistory.length - 1 - histIdx];
+				return;
+			}
+			if (e.key === 'ArrowDown' && navigating) {
+				e.preventDefault();
+				histIdx -= 1;
+				input = histIdx < 0 ? '' : inputHistory[inputHistory.length - 1 - histIdx];
+				return;
+			}
+		}
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			submit();
@@ -326,20 +403,16 @@
 			return;
 		}
 		const text = input.trim();
-		// Setup híbrido: capturar as respostas às perguntas no chat.
-		if (setupStage) {
-			input = '';
-			autoGrow();
-			handleSetupAnswer(text);
-			return;
-		}
-		// Modo aventura: o texto livre é um turno no modo selecionado (Do/Say/Story).
-		if (adventureMode) {
-			if (!text || streaming) return;
-			input = '';
-			autoGrow();
-			runAdventureTurn(text, inputMode);
-			return;
+		// Regista no histórico; se ocupado, enfileira em vez de descartar.
+		if (text) {
+			inputHistory.push(text);
+			histIdx = -1;
+			if (streaming) {
+				msgQueue.push(text);
+				input = '';
+				autoGrow();
+				return;
+			}
 		}
 		send();
 	}
@@ -360,296 +433,45 @@
 		scrollToBottom();
 	}
 
-	// ---- Modo aventura (AI Dungeon) ----
-
-	/** Reconstrói as mensagens visíveis a partir do espelho de turnos do backend. */
-	function renderAdventure() {
-		messages = advTurns.map((t) => ({
-			role: t.role,
-			content: t.content,
-			model: t.role === 'assistant' ? advInfo?.model || 'AI Dungeon' : undefined
-		}));
-	}
-
-	/** Avisa se o modelo de aventura configurado não está instalado (usa-se o fallback). */
-	function adventureModelHint() {
-		if (adventureModel && !models.includes(adventureModel)) {
-			pushInfo(
-				`Nota: o modelo de aventura "${adventureModel}" não está instalado. Corre no terminal:\n  ollama pull ${adventureModel}\nEntretanto uso o de reserva "${adventureFallback || selectedModel}".`
-			);
-		}
-	}
-
-	/** /aidungeon: abre o setup, ou sai se o argumento for "sair". */
-	function openAdventure(rest: string) {
-		if (['sair', 'exit', 'parar', 'stop'].includes(rest.toLowerCase())) {
-			if (adventureMode) exitAdventure();
-			return;
-		}
-		setupOpen = true;
-	}
-
-	/** Modal -> "Nova aventura": começa as perguntas híbridas no chat. */
-	function onSetupNew() {
-		setupOpen = false;
-		messages = [];
-		setupWorld = '';
-		setupStage = 'world';
-		pushInfo('Vamos criar uma aventura. Em uma frase, que mundo ou cenário queres viver?');
-		textarea?.focus();
-	}
-
-	/** Recebe a resposta de cada pergunta do setup híbrido. */
-	function handleSetupAnswer(text: string) {
-		if (!text) return;
-		if (setupStage === 'world') {
-			setupWorld = text;
-			setupStage = 'hero';
-			pushInfo('E quem és tu nesta história? (o teu protagonista, em poucas palavras)');
-			return;
-		}
-		if (setupStage === 'hero') {
-			const hero = text;
-			setupStage = null;
-			const scenario = `Mundo: ${setupWorld}\nProtagonista: ${hero}`;
-			const title = setupWorld.slice(0, 48);
-			startAdventure(title, scenario);
-		}
-	}
-
-	/** Cria a aventura no backend e gera a abertura (turno "continue"). */
-	async function startAdventure(title: string, scenario: string) {
-		try {
-			const adv = await createAdventure({ title, scenario });
-			enterAdventure(adv);
-			adventureModelHint();
-			pushInfo('A tecer o teu mundo…');
-			await runAdventureTurn('', 'continue');
-		} catch (e) {
-			errorMsg = 'falha a criar a aventura';
-			setupStage = null;
-		}
-	}
-
-	/** Carrega uma aventura existente e entra no modo (a partir da lista/setup). */
-	async function continueAdventure(id: string) {
-		try {
-			const adv = await getAdventure(id);
-			enterAdventure(adv);
-			renderAdventure();
-			adventureModelHint();
-			await scrollToBottom();
-		} catch (e) {
-			errorMsg = 'falha a carregar a aventura';
-		}
-	}
-
-	function enterAdventure(adv: Adventure) {
-		adventureId = adv.id;
-		adventureMode = true;
-		advTurns = adv.turns ?? [];
-		advInfo = {
-			title: adv.title,
-			scenario: adv.scenario,
-			memory: adv.memory,
-			authors_note: adv.authors_note,
-			model: adv.model
-		};
-		redoStack = [];
-		inputMode = 'do';
-		conversationId = null;
-		messages = [];
-		setupOpen = false;
-		setupStage = null;
-	}
-
-	/** Enquadra o input do jogador (tem de bater certo com o backend `_mode_frame`). */
-	function frameInput(text: string, mode: AdventureMode): string {
-		if (mode === 'say') return `> Dizes: "${text}"`;
-		if (mode === 'story') return text;
-		return `> ${text}`; // do
-	}
-
-	async function runAdventureTurn(rawInput: string, mode: AdventureMode) {
-		if (!adventureId || streaming) return;
-		errorMsg = null;
-		redoStack = [];
-		const isContinue = mode === 'continue';
-		if (!isContinue) {
-			advTurns.push({ role: 'user', mode, content: frameInput(rawInput, mode), ts: new Date().toISOString() });
-			renderAdventure();
-		}
-		const idx = messages.push({ role: 'assistant', content: '', model: advInfo?.model || 'AI Dungeon' }) - 1;
-		streaming = true;
-		await scrollToBottom();
-
-		await streamAdventureTurn(adventureId, rawInput, mode, {
-			onToken: (t) => {
-				messages[idx].content += t;
-				scrollToBottom();
-			},
-			onDone: () => {
-				streaming = false;
-				advTurns.push({
-					role: 'assistant',
-					mode,
-					content: messages[idx].content,
-					ts: new Date().toISOString()
-				});
-				renderAdventure();
-			},
-			onError: (msg) => {
-				errorMsg = msg;
-				streaming = false;
-				if (!isContinue) advTurns.pop(); // reverte o turno não persistido
-				renderAdventure();
-			}
-		});
-	}
-
-	/** /repetir (Retry): apaga a última narração e regenera a partir da mesma ação. */
-	async function retryAdventure() {
-		if (!adventureId || streaming) return;
-		if (!advTurns.some((t) => t.role === 'assistant')) {
-			pushInfo('Ainda não há nada para repetir.');
-			return;
-		}
-		// remover a última narração
-		for (let i = advTurns.length - 1; i >= 0; i--) {
-			if (advTurns[i].role === 'assistant') {
-				advTurns.splice(i, 1);
-				break;
-			}
-		}
-		try {
-			await patchAdventure(adventureId, { turns: advTurns });
-		} catch (e) {
-			errorMsg = 'falha a repetir';
-			return;
-		}
-		renderAdventure();
-		await runAdventureTurn('', 'continue');
-	}
-
-	/** /retroceder (Undo): apaga o último passo (narração + ação que a despoletou). */
-	async function undoAdventure() {
-		if (!adventureId || streaming || advTurns.length === 0) return;
-		const removed: AdventureTurnEntry[] = [];
-		if (advTurns[advTurns.length - 1].role === 'assistant') removed.unshift(advTurns.pop()!);
-		if (advTurns.length && advTurns[advTurns.length - 1].role === 'user') removed.unshift(advTurns.pop()!);
-		if (removed.length === 0) return;
-		redoStack.push(removed);
-		try {
-			await patchAdventure(adventureId, { turns: advTurns });
-		} catch (e) {
-			errorMsg = 'falha a retroceder';
-			return;
-		}
-		renderAdventure();
-	}
-
-	/** /refazer (Redo): repõe o último passo desfeito. */
-	async function redoAdventure() {
-		if (!adventureId || streaming || redoStack.length === 0) return;
-		const group = redoStack.pop()!;
-		advTurns.push(...group);
-		try {
-			await patchAdventure(adventureId, { turns: advTurns });
-		} catch (e) {
-			errorMsg = 'falha a refazer';
-			return;
-		}
-		renderAdventure();
-	}
-
-	/** /editar: edita o texto da última narração. */
-	async function editLastNarration() {
-		if (!adventureId || streaming) return;
-		let i = advTurns.length - 1;
-		while (i >= 0 && advTurns[i].role !== 'assistant') i--;
-		if (i < 0) return;
-		const novo = window.prompt('Editar a última narração:', advTurns[i].content);
-		if (novo == null) return;
-		advTurns[i].content = novo;
-		try {
-			await patchAdventure(adventureId, { turns: advTurns });
-		} catch (e) {
-			errorMsg = 'falha a editar';
-			return;
-		}
-		renderAdventure();
-	}
-
-	async function setAdventureField(field: 'memory' | 'authors_note' | 'title', value: string) {
-		if (!adventureId || !advInfo) return;
-		try {
-			await patchAdventure(adventureId, { [field]: value } as any);
-			(advInfo as any)[field === 'title' ? 'title' : field] = value;
-		} catch (e) {
-			errorMsg = 'falha a guardar';
-		}
-	}
-
-	async function addStoryCard(rest: string) {
-		if (!adventureId) return;
-		const [keysPart, ...txt] = rest.split('|');
-		const keys = keysPart.split(',').map((k) => k.trim()).filter(Boolean);
-		const text = txt.join('|').trim();
-		if (keys.length === 0 || !text) {
-			pushInfo('Uso: /cartao <gatilho1, gatilho2> | <texto>');
-			return;
-		}
-		try {
-			const adv = await getAdventure(adventureId);
-			const cards = [...(adv.story_cards ?? []), { keys, text }];
-			await patchAdventure(adventureId, { story_cards: cards });
-			pushInfo(`Story Card criado (gatilhos: ${keys.join(', ')}).`);
-		} catch (e) {
-			errorMsg = 'falha a criar o cartão';
-		}
-	}
-
-	function showScenario() {
-		if (!advInfo) return;
-		const parts = [`Título: ${advInfo.title}`, `Modelo: ${advInfo.model || '(reserva)'}`];
-		if (advInfo.scenario) parts.push('\nCenário:\n' + advInfo.scenario);
-		if (advInfo.memory) parts.push('\nMemória:\n' + advInfo.memory);
-		if (advInfo.authors_note) parts.push('\nNota de autor:\n' + advInfo.authors_note);
-		pushInfo(parts.join('\n'));
-	}
-
-	function exitAdventure() {
-		exitAdventureState();
-		pushInfo('Saíste da aventura. Fica guardada na aba Aventuras.');
-	}
-
-	/** Subcomando de modo (Do/Say/Story): muda o modo e, se houver texto, joga já. */
-	function adventureCmd(rest: string, mode: 'do' | 'say' | 'story') {
-		if (!adventureMode) {
-			errorMsg = 'Entra no modo aventura com /aidungeon.';
-			return;
-		}
-		inputMode = mode;
-		if (rest) runAdventureTurn(rest, mode);
-		else textarea?.focus();
-	}
-
 	function runCommand(name: string, rest: string) {
 		input = '';
 		slashHidden = false;
 		autoGrow();
 		switch (name) {
 			case 'help':
-				pushInfo(helpText(adventureMode));
-				break;
-			case 'ajuda':
-				pushInfo(helpText(true));
-				break;
-			case 'aidungeon':
-				openAdventure(rest);
+				pushInfo(helpText());
 				break;
 			case 'new':
 				newConversation();
+				break;
+			case 'clear':
+				messages = [];
+				conversationId = null;
+				errorMsg = null;
+				pendingImage = null;
+				pendingFile = null;
+				break;
+			case 'compact':
+				if (!conversationId) {
+					errorMsg = 'Nenhuma conversa para compactar.';
+					break;
+				}
+				streaming = true;
+				activity = { kind: 'thinking', text: 'a compactar…' };
+				compactChat(conversationId)
+					.then((r) => {
+						messages = [
+							{ role: 'user', content: '[contexto compactado]' },
+							{ role: 'assistant', content: r.summary, model: 'sistema' }
+						];
+						streaming = false;
+						activity = null;
+					})
+					.catch((e) => {
+						errorMsg = String(e);
+						streaming = false;
+						activity = null;
+					});
 				break;
 			case 'model':
 				if (rest) {
@@ -682,66 +504,7 @@
 				fileInput?.click();
 				break;
 			case 'retry':
-				if (adventureMode) retryAdventure();
-				else regenerate(messages.length);
-				break;
-			// --- Subcomandos de aventura (estilo AI Dungeon) ---
-			case 'fazer':
-				adventureCmd(rest, 'do');
-				break;
-			case 'dizer':
-				adventureCmd(rest, 'say');
-				break;
-			case 'historia':
-				adventureCmd(rest, 'story');
-				break;
-			case 'continuar':
-				if (adventureMode) runAdventureTurn('', 'continue');
-				break;
-			case 'repetir':
-				retryAdventure();
-				break;
-			case 'retroceder':
-				undoAdventure();
-				break;
-			case 'refazer':
-				redoAdventure();
-				break;
-			case 'editar':
-				editLastNarration();
-				break;
-			case 'lembrar':
-				if (rest && advInfo) {
-					const mem = (advInfo.memory ? advInfo.memory + '\n' : '') + rest;
-					setAdventureField('memory', mem);
-					pushInfo('Memória da história atualizada.');
-				}
-				break;
-			case 'nota':
-				if (advInfo) {
-					setAdventureField('authors_note', rest);
-					pushInfo('Nota de autor atualizada.');
-				}
-				break;
-			case 'cartao':
-				addStoryCard(rest);
-				break;
-			case 'cenario':
-				showScenario();
-				break;
-			case 'guardar':
-				if (rest && advInfo) {
-					setAdventureField('title', rest);
-					pushInfo(`Aventura renomeada para "${rest}".`);
-				} else {
-					pushInfo('Aventura guardada.');
-				}
-				break;
-			case 'aventuras':
-				onOpenAdventures();
-				break;
-			case 'sair':
-				if (adventureMode) exitAdventure();
+				regenerate(messages.length);
 				break;
 			default:
 				errorMsg = `Comando desconhecido: /${name}. Usa /help.`;
@@ -776,7 +539,15 @@
 	}
 </script>
 
-<div class="chat-area">
+<div
+	class="chat-area"
+	ondragover={(e) => { e.preventDefault(); dragging = true; }}
+	ondragleave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) dragging = false; }}
+	ondrop={(e) => { e.preventDefault(); dragging = false; const f = e.dataTransfer?.files?.[0]; if (f) processFile(f); }}
+>
+	{#if dragging}
+		<div class="drop-overlay">Larga aqui o ficheiro</div>
+	{/if}
 	<div class="scroller" bind:this={scroller}>
 		<div class="thread">
 			{#if !hasMessages && uiWelcome}
@@ -808,9 +579,19 @@
 					</div>
 					<div class="body">
 						{#if m.image}<img class="msg-image" src={m.image} alt="imagem anexada" />{/if}
-						{#if m.content}{m.role === 'assistant' ? displayContent(m.content) : m.content}{:else if streaming && i === messages.length - 1}<span
-								class="dots"><span></span><span></span><span></span></span
-							>{/if}
+						{#if m.file}<span class="msg-file"><Icon name="file-text" size={13} /> {m.file.name}</span>{/if}
+						{#if m.role === 'assistant'}
+							{@const parsed = parseAssistant(m.content)}
+							{#if uiThinking && parsed.think.trim()}
+								<ThinkingPanel content={parsed.think} active={parsed.thinking && streaming && i === messages.length - 1} />
+							{/if}
+							{#if displayAnswer(parsed.answer)}
+								{#if streaming && i === messages.length - 1}<div class="streaming-md"><Markdown source={sanitizePartial(displayAnswer(parsed.answer))} /><span class="caret"></span></div>
+								{:else}<Markdown source={displayAnswer(parsed.answer)} />{/if}
+							{:else if streaming && i === messages.length - 1}
+								{#if activity}<ActivityLane kind={activity.kind} text={activity.text} />{:else}<Spinner />{/if}
+							{/if}
+						{:else if m.content}{m.content}{/if}
 					</div>
 
 					{#if m.role === 'assistant' && m.content && !(streaming && i === messages.length - 1)}
@@ -860,24 +641,6 @@
 	</div>
 
 	<div class="composer-zone" class:welcome={!hasMessages}>
-		{#if adventureMode}
-			<div class="adv-bar">
-				<div class="adv-modes" role="group" aria-label="modo de jogada">
-					<button class:on={inputMode === 'do'} onclick={() => (inputMode = 'do')} title="Ação (Do)">Fazer</button>
-					<button class:on={inputMode === 'say'} onclick={() => (inputMode = 'say')} title="Falar (Say)">Dizer</button>
-					<button class:on={inputMode === 'story'} onclick={() => (inputMode = 'story')} title="Narrar (Story)">História</button>
-				</div>
-				<div class="adv-actions">
-					<button class="adv-continue" onclick={() => runAdventureTurn('', 'continue')} disabled={streaming} title="Continuar: o MJ avança">
-						<Icon name="play" size={13} /> Continuar
-					</button>
-					<button onclick={retryAdventure} disabled={streaming} title="Repetir (Retry)" aria-label="Repetir"><Icon name="refresh" size={14} /></button>
-					<button onclick={undoAdventure} disabled={streaming} title="Retroceder (Undo)" aria-label="Retroceder"><Icon name="undo" size={14} /></button>
-					<button onclick={() => onOpenAdventures()} title="Aventuras guardadas" aria-label="Aventuras"><Icon name="dice" size={14} /></button>
-					<button onclick={exitAdventure} title="Sair da aventura" aria-label="Sair"><Icon name="x" size={14} /></button>
-				</div>
-			</div>
-		{/if}
 		<div class="composer">
 			{#if pendingImage}
 				<div class="image-chip">
@@ -885,29 +648,39 @@
 					<button class="chip-remove" onclick={() => (pendingImage = null)} aria-label="remover">×</button>
 				</div>
 			{/if}
+			{#if pendingFile}
+				<div class="file-chip">
+					<Icon name="file-text" size={14} />
+					<span class="file-name">{pendingFile.name}</span>
+					<button class="chip-remove" onclick={() => (pendingFile = null)} aria-label="remover">×</button>
+				</div>
+			{/if}
 			<div class="input-row">
-				<input bind:this={fileInput} type="file" accept="image/*" onchange={onPickFile} hidden />
+				<input bind:this={fileInput} type="file" accept={FILE_ACCEPT} onchange={onPickFile} hidden />
 					{#if slashMenuOpen}
 						<div class="slash-menu" role="listbox" tabindex="-1">
-							{#each slashMatches as c, i (c.name)}
-								<button
-									class="slash-item"
-									class:active={i === slashIndex}
-									onmousedown={(e) => {
-										e.preventDefault();
-										pickSlash(c);
-									}}
-								>
-									<span class="slash-name">/{c.name}{#if c.hint}<span class="slash-hint"> {c.hint}</span>{/if}</span>
-									<span class="slash-desc">{c.desc}</span>
-								</button>
+							{#each groupedSlash as group}
+								{#if group.cat}<div class="slash-cat">{group.cat}</div>{/if}
+								{#each group.cmds as c (c.name)}
+									<button
+										class="slash-item"
+										class:active={slashMatches.indexOf(c) === slashIndex}
+										onmousedown={(e) => {
+											e.preventDefault();
+											pickSlash(c);
+										}}
+									>
+										<span class="slash-name">/{c.name}{#if c.hint}<span class="slash-hint"> {c.hint}</span>{/if}</span>
+										<span class="slash-desc">{c.desc}</span>
+									</button>
+								{/each}
 							{/each}
 						</div>
 					{/if}
 					{#if plusMenuOpen}
 						<div class="plus-menu">
 							<button onclick={() => { plusMenuOpen = false; fileInput.click(); }}>
-								<Icon name="paperclip" size={14} /> Anexar imagem
+								<Icon name="paperclip" size={14} /> Anexar ficheiro
 							</button>
 							<button onclick={() => { plusMenuOpen = false; input = (input ? input + '\n' : '') + 'Age como um especialista e '; textarea?.focus(); autoGrow(); }}>
 								<Icon name="zap" size={14} /> Prompt
@@ -921,7 +694,7 @@
 					class="attach-btn"
 					onclick={() => (plusMenuOpen = !plusMenuOpen)}
 					disabled={streaming}
-					title="anexar imagem"
+					title="anexar ficheiro"
 					aria-label="anexar"
 				>
 					<Icon name="plus" size={18} />
@@ -949,22 +722,13 @@
 					bind:value={input}
 					oninput={onComposerInput}
 					onkeydown={onKeydown}
-					placeholder={adventureMode
-						? inputMode === 'say'
-							? 'o que dizes… (/ para comandos da aventura)'
-							: inputMode === 'story'
-								? 'escreve a narração… (/ para comandos)'
-								: 'a tua ação… (/ para comandos)'
-						: setupStage
-							? 'responde para criares a aventura…'
-							: 'pergunta alguma coisa…  (/ para comandos)'}
+					placeholder="pergunta alguma coisa…  (/ para comandos)"
 					rows="1"
-					disabled={streaming}
 				></textarea>
 				<button
 					class="send-btn"
 					onclick={submit}
-					disabled={streaming || (input.trim() === '' && !pendingImage)}
+					disabled={input.trim() === '' && !pendingImage && !pendingFile}
 					aria-label="enviar"
 				>
 					<Icon name="arrow-up" size={17} stroke={2.4} />
@@ -997,26 +761,30 @@
 					</div>
 				{/if}
 			</div>
-			<span class="ctx" title="janela de contexto estimada">
-				<span class="ctx-ring" style="--p:{contextPct}"></span>{contextPct}% contexto
-			</span>
+			<div class="status-group">
+				{#if msgQueue.length}
+					<span class="st-queue" title="mensagens em fila">{msgQueue.length} em fila</span>
+				{/if}
+				{#if lastTps}<span class="st-tps">{lastTps.toFixed(1)} tok/s</span>{/if}
+				<span
+					class="st-health"
+					class:bad={!ollamaOnline}
+					title={ollamaOnline ? 'Ollama ligado' : 'Ollama indisponível'}
+				>
+					<span class="st-dot"></span>Ollama
+				</span>
+				<span class="ctx" title="janela de contexto estimada">
+					<span class="ctx-ring" style="--p:{contextPct}"></span>{contextPct}% contexto
+				</span>
+			</div>
 		</div>
 	</div>
 
-	{#if setupOpen}
-		<AdventureSetup
-			onNew={onSetupNew}
-			onContinue={(id) => {
-				setupOpen = false;
-				continueAdventure(id);
-			}}
-			onClose={() => (setupOpen = false)}
-		/>
-	{/if}
 </div>
 
 <style>
 	.chat-area {
+		position: relative;
 		flex: 1;
 		min-width: 0;
 		height: 100dvh;
@@ -1245,7 +1013,7 @@
 		}
 	}
 
-	/* ---- Composer simplificado ---- */
+	/* ---- Composer ---- */
 	.composer-zone {
 		max-width: 800px;
 		width: 100%;
@@ -1255,76 +1023,6 @@
 	}
 	.composer-zone.welcome {
 		margin-bottom: 26vh;
-	}
-	.adv-bar {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 10px;
-		flex-wrap: wrap;
-		margin-bottom: 8px;
-		padding: 0 4px;
-	}
-	.adv-modes {
-		display: inline-flex;
-		background: color-mix(in srgb, var(--panel) 92%, var(--bg));
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		padding: 3px;
-	}
-	.adv-modes button {
-		background: transparent;
-		border: none;
-		color: var(--fg-muted);
-		font-family: var(--font-ui);
-		font-size: 12px;
-		font-weight: 600;
-		padding: 5px 13px;
-		border-radius: 999px;
-		cursor: pointer;
-		transition: color 0.13s, background 0.13s;
-	}
-	.adv-modes button:hover {
-		color: var(--fg);
-	}
-	.adv-modes button.on {
-		color: var(--panel-2);
-		background: var(--accent);
-	}
-	.adv-actions {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-	}
-	.adv-actions button {
-		display: inline-grid;
-		place-items: center;
-		gap: 5px;
-		grid-auto-flow: column;
-		min-width: 30px;
-		height: 30px;
-		padding: 0 8px;
-		background: transparent;
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		color: var(--fg-muted);
-		font-family: var(--font-ui);
-		font-size: 12px;
-		font-weight: 600;
-		cursor: pointer;
-		transition: color 0.13s, border-color 0.13s, background 0.13s;
-	}
-	.adv-actions button:hover:not(:disabled) {
-		color: var(--accent);
-		border-color: var(--accent);
-		background: color-mix(in srgb, var(--accent) 10%, transparent);
-	}
-	.adv-actions button:disabled {
-		opacity: 0.4;
-		cursor: default;
-	}
-	.adv-continue {
-		color: var(--fg) !important;
 	}
 	.composer {
 		display: flex;
@@ -1417,6 +1115,18 @@
 	.slash-hint {
 		color: var(--fg-muted);
 		font-weight: 400;
+	}
+	.slash-cat {
+		font-size: 9.5px;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--fg-muted);
+		opacity: 0.6;
+		padding: 7px 11px 2px;
+	}
+	.slash-cat:first-child {
+		padding-top: 3px;
 	}
 	.slash-desc {
 		font-size: 11.5px;
@@ -1569,6 +1279,41 @@
 		margin-bottom: 8px;
 		display: block;
 	}
+	/* Chip de ficheiro de texto/código anexado (preview no composer). */
+	.file-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 7px;
+		position: relative;
+		width: fit-content;
+		max-width: 100%;
+		margin: 4px 0 0 6px;
+		padding: 6px 12px 6px 10px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
+		color: var(--fg-strong);
+		font-size: 12.5px;
+	}
+	.file-name {
+		max-width: 220px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	/* Chip do ficheiro dentro de uma mensagem já enviada. */
+	.msg-file {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		margin-bottom: 8px;
+		padding: 4px 10px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		font-family: var(--font-ui);
+		font-size: 12px;
+		color: var(--fg-muted);
+	}
 
 	/* ---- Rodapé: modelo + contexto (estilo ChatGPT) ---- */
 	.meta-foot {
@@ -1661,32 +1406,74 @@
 		mask: radial-gradient(circle 3px at center, transparent 96%, #000 0);
 	}
 
-	.dots {
-		display: inline-flex;
-		gap: 4px;
-		padding: 4px 0;
+	.answer {
+		white-space: pre-wrap;
 	}
-	.dots span {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
+	.streaming-md {
+		position: relative;
+	}
+	.streaming-md :global(.md) {
+		display: inline;
+	}
+	.streaming-md :global(.md p:last-child) {
+		display: inline;
+	}
+	.streaming-md > .caret {
+		display: inline-block;
+		width: 0.55ch;
+		height: 1.1em;
+		margin-left: 2px;
+		vertical-align: -0.15em;
 		background: var(--accent);
-		animation: blink 1.4s infinite both;
+		border-radius: 1px;
+		animation: pen-caret 1s steps(1) infinite;
 	}
-	.dots span:nth-child(2) {
-		animation-delay: 0.2s;
+
+	/* Status bar (B5) */
+	.status-group {
+		display: inline-flex;
+		align-items: center;
+		gap: 12px;
 	}
-	.dots span:nth-child(3) {
-		animation-delay: 0.4s;
+	.st-tps,
+	.st-queue {
+		font-size: 11px;
+		color: var(--fg-muted);
 	}
-	@keyframes blink {
-		0%,
-		80%,
-		100% {
-			opacity: 0.25;
-		}
-		40% {
-			opacity: 1;
-		}
+	.st-queue {
+		color: var(--accent);
+	}
+	.st-health {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: 11px;
+		color: var(--fg-muted);
+	}
+	.st-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--green, #50c878);
+		box-shadow: 0 0 6px var(--green, #50c878);
+	}
+	.st-health.bad .st-dot {
+		background: var(--red);
+		box-shadow: 0 0 6px var(--red);
+	}
+	.drop-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 50;
+		display: grid;
+		place-items: center;
+		background: color-mix(in srgb, var(--accent) 10%, transparent);
+		border: 2px dashed var(--accent);
+		border-radius: 14px;
+		pointer-events: none;
+		font-size: 14px;
+		font-weight: 600;
+		color: var(--accent);
+		backdrop-filter: blur(2px);
 	}
 </style>

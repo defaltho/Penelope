@@ -33,10 +33,8 @@
 		{ id: 'skills', icon: 'lightbulb', label: 'Skills' },
 		{ id: 'compare', icon: 'columns', label: 'Compare' },
 		{ id: 'gallery', icon: 'image', label: 'Galeria' },
-		{ id: 'notes', icon: 'sticky-note', label: 'Notas' },
-		{ id: 'tasks', icon: 'list-checks', label: 'Tarefas' },
+		{ id: 'workspace', icon: 'list-checks', label: 'Bloco' },
 		{ id: 'documents', icon: 'file-text', label: 'Documentos' },
-		{ id: 'adventures', icon: 'dice', label: 'Aventuras' },
 		{ id: 'agents', icon: 'bot', label: 'Agents' }
 	];
 

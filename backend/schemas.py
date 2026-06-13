@@ -52,38 +52,14 @@ class AgentStep(BaseModel):
 
 
 class AgentRunRequest(BaseModel):
-    task: str
-
-
-# --- Aventura (/aidungeon, estilo AI Dungeon) ---
-
-class AdventureCreate(BaseModel):
-    title: str = Field(default="", description="Título da aventura.")
-    scenario: str = Field(default="", description="Premissa/mundo (Quick Start).")
-    instructions: str = Field(default="", description="AI Instructions extra (opcional).")
-
-
-class AdventureMode(str, Enum):
-    do = "do"               # ação da personagem
-    say = "say"             # fala da personagem
-    story = "story"         # narração escrita pelo jogador
-    continue_ = "continue"  # o MJ avança sem novo input
-
-
-class AdventureTurn(BaseModel):
-    input: str = Field(default="", description="Texto do jogador (vazio em modo continue).")
-    mode: AdventureMode = AdventureMode.do
-
-
-class AdventurePatch(BaseModel):
-    """Edições de contexto/turnos (undo, edit, memory, author's note, story cards)."""
-    title: str | None = None
-    scenario: str | None = None
-    instructions: str | None = None
-    memory: str | None = None
-    authors_note: str | None = None
-    story_cards: list[dict] | None = None
-    turns: list[dict] | None = None
+    task: str = ""
+    # Retoma após aprovação inline de uma ferramenta perigosa (B8). Quando presente,
+    # `state` transporta o progresso do loop e `decision` resolve a tool pendente.
+    state: dict | None = None
+    decision: str | None = None  # allow_once | allow_session | allow_always | deny
+    pending_tool: str | None = None
+    pending_args: dict | None = None
+    pending_thought: str = ""
 
 
 # --- Consolidação (Camada A, passo 2) ---
@@ -108,6 +84,10 @@ class ConsolidationDecision(BaseModel):
 
 # --- API HTTP ---
 
+class CompactRequest(BaseModel):
+    conversation_id: int
+
+
 class ChatRequest(BaseModel):
     conversation_id: int | None = None
     message: str = ""
@@ -120,7 +100,7 @@ class ChatRequest(BaseModel):
     web_search: bool = Field(default=False, description="Pesquisa na web antes de responder (requer internet).")
     system_override: str | None = Field(
         default=None,
-        description="System prompt base alternativo (ex.: modo /aidungeon). Memória/skills continuam a poder ser injetadas.",
+        description="System prompt base alternativo. Memória/skills continuam a poder ser injetadas.",
     )
 
 
