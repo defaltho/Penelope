@@ -1,15 +1,19 @@
 # Penelope
 
 ```
-───────────────────────────────────────────────
- ⊹ ࣪ ˖   Penelope vers. 1.2
-───────────────────────────────────────────────
+██████╗ ███████╗███╗   ██╗███████╗██╗      ██████╗ ██████╗ ███████╗
+██╔══██╗██╔════╝████╗  ██║██╔════╝██║     ██╔═══██╗██╔══██╗██╔════╝
+██████╔╝█████╗  ██╔██╗ ██║█████╗  ██║     ██║   ██║██████╔╝█████╗
+██╔═══╝ ██╔══╝  ██║╚██╗██║██╔══╝  ██║     ██║   ██║██╔═══╝ ██╔══╝
+██║     ███████╗██║ ╚████║███████╗███████╗╚██████╔╝██║     ███████╗
+╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝ ╚═════╝ ╚═╝     ╚══════╝
+   ⊹ ࣪ ˖   local-first AI assistant
 ```
 
 A **local-first** AI assistant: chat with persistent memory, general-purpose
-vision, notes and tasks, a transaction-structuring pipeline, an **AI Dungeon**
-game mode, and global search. Inspired by the UX/UI of the Odysseus project, but
-minimalist. It runs offline, with your data on your machine.
+vision, notes and tasks, a transaction-structuring pipeline, and global search.
+Inspired by the UX/UI of the Odysseus project, but minimalist. It runs offline,
+with your data on your machine.
 
 Penelope is yours. Open source and free: no sales team, no demo request, no
 hidden cloud calls. It runs on your hardware, with your data, local-first and
@@ -92,14 +96,8 @@ Prefer to do it step by step, or already have the prerequisites? See
   them.
 - **Compare**: two models side by side.
 - **Global search** (Ctrl/Cmd+K) across all conversations.
-- **Chat commands** (type `/` in the composer): `/help`, `/aidungeon`, `/new`,
-  `/model`, `/search`, `/incognito`, `/think`, `/image`, `/retry`. The menu adapts
-  to context (normal chat vs adventure).
-- **AI Dungeon** (`/aidungeon`): a text game with the **Harbinger-24B** model and
-  its official sampler (temp 0.8, repetition penalty 1.05, min-p 0.025) in ChatML.
-  Do / Say / Story plus Continue modes, Retry / Undo / Edit, and persistent context
-  with `/remember`, `/note` and `/card`. Stories are saved in the **Adventures**
-  tab. Without Harbinger installed, it falls back to the reserve model (qwen3-vl).
+- **Chat commands** (type `/` in the composer): `/help`, `/new`, `/model`,
+  `/search`, `/incognito`, `/think`, `/image`, `/retry`.
 - **Agent Tools** (Agents view and Settings → Agent Tools): local tools with a
   per-tool on/off toggle. The dangerous ones (`bash`, `python`, `write_file`) are
   **off by default**; even when enabled, each call requests **inline approval**
@@ -178,9 +176,6 @@ browser at <http://localhost:5173>. Press `Ctrl+C` to stop everything.
 ```bash
 ollama pull qwen3-vl:8b        # 8 GB VRAM: use qwen3-vl:4b instead
 ollama pull embeddinggemma     # embeddings (CPU, zero VRAM)
-
-# optional, for AI Dungeon mode (~14 GB):
-ollama pull hf.co/LatitudeGames/Harbinger-24B-GGUF:Q4_K_M
 ```
 
 The `penelope` launcher also pulls any missing model automatically on first run.
@@ -311,11 +306,6 @@ thanks:
   verb-based spinner, the reasoning panel, inline tool approvals) and memory patterns
   (anti-injection fencing, per-conversation ordered sync, recoverable archive,
   "umbrella" consolidation).
-- **[Harbinger-24B](https://huggingface.co/LatitudeGames/Harbinger-24B)** (Latitude Games):
-  the model behind AI Dungeon mode, with the official sampler (temp 0.8 / rep 1.05 /
-  min-p 0.025) and system message used **verbatim**.
-- **[AI Dungeon](https://aidungeon.com)** (Latitude): the game-mode mechanics
-  (Do/Say/Story, Continue, Memory / Author's Note / Story Cards).
 
 Each project belongs to its respective authors and keeps its own license. Penelope
 does not redistribute code from those repositories; it only reuses ideas and the
