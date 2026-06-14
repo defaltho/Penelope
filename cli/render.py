@@ -128,15 +128,31 @@ BANNER_ART = [
 ]
 
 
-def print_banner(model: str, *, cwd: str = "", conversation: str = "nova conversa") -> None:
-    from cli.theme import ACCENT, FG, MUTED, RULE, SPARK, TAGLINE, VERSION
+def print_banner(
+    model: str,
+    *,
+    cwd: str = "",
+    conversation: str = "nova conversa",
+    tools: list[tuple[str, str]] | None = None,
+    skills: list[str] | None = None,
+    session_id: str = "",
+) -> None:
+    """Hermes-style boxed banner: wordmark + a panel with a loom motif on the
+    left and the capability / skill lists (plus counts) on the right."""
+    from cli.i18n import capabilities, t
+    from cli.theme import ACCENT, FG, LOOM_ART, MUTED, RULE, SPARK, VERSION
 
     if not HAS_RICH:
         print(f"penelope · cli v{VERSION}")
-        print(f"modelo: {model} · /help para comandos")
+        print(f"{t('banner.model')} {model} · /help {t('banner.help_suffix')}")
         return
 
-    w = min(_console.width or 80, 76)
+    from rich import box as _box
+    from rich.console import Group
+
+    tools = tools if tools is not None else capabilities()
+    skills = skills or []
+    TAGLINE = t("tagline")
 
     _console.print()
     # ASCII wordmark (no_wrap+crop so a narrow terminal trims instead of wrapping).
@@ -144,35 +160,72 @@ def print_banner(model: str, *, cwd: str = "", conversation: str = "nova convers
         _console.print(Text("  " + line, style=f"bold {ACCENT}"), no_wrap=True, crop=True)
     _console.print()
 
-    # Sub-line: ⊹ assistente local                              v0.2.0
-    head = Text()
-    head.append(f"  {SPARK} ", style=f"bold {ACCENT}")
-    head.append(TAGLINE, style=MUTED)
-    pad = max(w - 2 - len(f"{SPARK} {TAGLINE}") - len(f"v{VERSION}"), 1)
-    head.append(" " * pad + f"v{VERSION}", style=RULE)
-    _console.print(head)
-
-    _console.print(Text("  " + "─" * (w - 2), style=RULE))
-
-    def _row(label: str, value: str, vstyle: str) -> None:
-        t = Text()
-        t.append(f"  {label:<8}", style=MUTED)
-        t.append(value, style=vstyle)
-        _console.print(t)
-
-    _row("modelo", model, f"bold {ACCENT}")
+    # --- Left column: loom motif + identity ---
+    left = Text()
+    for ln in LOOM_ART:
+        left.append(ln + "\n", style=RULE)
+    left.append("\n")
+    left.append(f"{SPARK} ", style=f"bold {ACCENT}")
+    left.append("local-first\n", style=MUTED)
     if cwd:
-        _row("pasta", cwd, FG)
-    _row("sessão", conversation, MUTED)
+        left.append(cwd + "\n", style=MUTED)
+    left.append(f"{t('banner.model')} {model}\n", style=MUTED)
+    if session_id:
+        left.append(f"{t('banner.session')} {session_id}", style=MUTED)
+    else:
+        left.append(conversation, style=MUTED)
+
+    # --- Right column: capabilities + active skills + counts ---
+    items: list = [Text(t("banner.capabilities"), style=f"bold {FG}")]
+    for name, desc in tools:
+        row = Text()
+        row.append(f"  {name:<9}", style=ACCENT)
+        row.append(desc, style=MUTED)
+        items.append(row)
+    items.append(Text(""))
+    items.append(Text(t("banner.skills"), style=f"bold {FG}"))
+    if skills:
+        items.append(Text("  " + ", ".join(skills), style=MUTED))
+    else:
+        items.append(Text("  " + t("banner.skills_none"), style=MUTED))
+    items.append(Text(""))
+
+    counts = Text()
+    counts.append(t("banner.count_caps", n=len(tools)), style=MUTED)
+    counts.append(" · ", style=RULE)
+    counts.append(t("banner.count_skills", n=len(skills)), style=MUTED)
+    counts.append(" · ", style=RULE)
+    counts.append("/help", style=f"bold {ACCENT}")
+    counts.append(" " + t("banner.help_suffix"), style=MUTED)
+    items.append(counts)
+
+    grid = Table.grid(padding=(0, 4))
+    grid.add_column()
+    grid.add_column()
+    grid.add_row(left, Group(*items))
+
+    title = Text()
+    title.append(f"{SPARK} Penelope ", style=f"bold {ACCENT}")
+    title.append(f"v{VERSION} · {TAGLINE}", style=MUTED)
+
+    _console.print(Panel(
+        grid,
+        title=title,
+        title_align="left",
+        border_style=RULE,
+        box=_box.ROUNDED,
+        padding=(1, 2),
+        expand=False,
+    ))
 
     _console.print()
     hint = Text("  ")
-    hint.append("/help", style=f"bold {ACCENT}")
-    hint.append(" comandos    ", style=MUTED)
     hint.append("enter", style=FG)
-    hint.append(" enviar    ", style=MUTED)
+    hint.append(f" {t('hint.send')}    ", style=MUTED)
     hint.append("alt+enter", style=FG)
-    hint.append(" nova linha", style=MUTED)
+    hint.append(f" {t('hint.newline')}    ", style=MUTED)
+    hint.append("/help", style=f"bold {ACCENT}")
+    hint.append(f" {t('hint.commands')}", style=MUTED)
     _console.print(hint)
     _console.print()
 
@@ -204,10 +257,11 @@ def print_thinking(text: str) -> None:
     from cli.theme import THINKING
 
     if HAS_RICH:
+        from cli.i18n import t
         _console.print(
             Panel(
                 Text(text.strip(), style="dim italic"),
-                title="raciocínio",
+                title=t("reasoning"),
                 title_align="left",
                 border_style=THINKING,
                 expand=False,
@@ -215,7 +269,8 @@ def print_thinking(text: str) -> None:
             )
         )
     else:
-        print(f"[raciocínio] {text}")
+        from cli.i18n import t
+        print(f"[{t('reasoning')}] {text}")
 
 
 # ─── Activity feed line (Hermes-style) ─────────────────────
@@ -245,20 +300,16 @@ def print_goodbye() -> None:
     from cli.theme import ACCENT, MUTED, SPARK
 
     if HAS_RICH:
-        _console.print(f"\n  [{ACCENT}]{SPARK}[/{ACCENT}] [{MUTED}]até já[/{MUTED}]\n")
+        from cli.i18n import t
+        _console.print(f"\n  [{ACCENT}]{SPARK}[/{ACCENT}] [{MUTED}]{t('goodbye')}[/{MUTED}]\n")
     else:
-        print("\naté já")
-
-
-_GROUP_LABELS = {
-    "conversa": "conversa",
-    "modos": "modos",
-    "dados": "dados & memória",
-    "sistema": "sistema",
-}
+        from cli.i18n import t
+        print("\n" + t("goodbye"))
 
 
 def print_help_table(commands: list) -> None:
+    from cli.i18n import t
+
     if not HAS_RICH:
         for cmd in commands:
             print(f"  {cmd.name:<15} {cmd.desc}")
@@ -272,7 +323,7 @@ def print_help_table(commands: list) -> None:
     _console.print()
     title = Text("  ")
     title.append(f"{SPARK} ", style=f"bold {ACCENT}")
-    title.append("comandos", style=f"bold {FG}")
+    title.append(t("help.title"), style=f"bold {FG}")
     _console.print(title)
     _console.print(Text("  " + "─" * (w - 2), style=RULE))
 
@@ -288,7 +339,7 @@ def print_help_table(commands: list) -> None:
             continue
         if gi > 0:
             _console.print()
-        _console.print(Text(f"  {_GROUP_LABELS.get(group, group)}", style=f"{MUTED} italic"))
+        _console.print(Text(f"  {t('group.' + group)}", style=f"{MUTED} italic"))
         for cmd in members:
             line = Text("    ")
             line.append(f"{cmd.name:<12}", style=f"bold {ACCENT}")

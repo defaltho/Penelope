@@ -21,13 +21,7 @@ BAR_BG = "#1b1f27"        # completion-menu background
 
 # Brand
 SPARK = "⊹"               # Penelope identity motif
-TAGLINE = "assistente local"
-
-STATUS_TEXT: dict[str, str] = {
-    "thinking": "a pensar…",
-    "web": "a pesquisar na web…",
-    "memory": "a recuperar memória…",
-}
+# Human-language strings (tagline, status text, capability list) live in cli.i18n.
 
 # Spinner animation (braille dots — clean, on-brand)
 SPINNER_FRAMES: list[str] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -46,4 +40,24 @@ CONTEXT_COLORS: list[tuple[int, str]] = [
     (80, WARNING),
     (95, ORANGE),
     (100, ERROR),
+]
+
+# Status bar (Hermes-style): ⚕ health │ ctx │ [bar] │ wall │ ⏲ turn
+HEALTH_GLYPH = "⚕"
+TIMER_GLYPH = "⏲"
+BAR_CELLS = 10
+BAR_FILLED = "█"
+BAR_EMPTY = "░"
+SEP = " │ "
+# Estimated context window (tokens) used to fill the ctx bar when the backend
+# does not report a real figure. Overridable from settings (num_ctx).
+DEFAULT_CTX_WINDOW = 8192
+
+# Small woven-loom motif (Penelope weaves) shown beside the banner lists.
+LOOM_ART: list[str] = [
+    "╭─┬─┬─┬─┬─╮",
+    "├─┼─┼─┼─┼─┤",
+    "├─┼─◈─┼─┼─┤",
+    "├─┼─┼─┼─┼─┤",
+    "╰─┴─┴─┴─┴─╯",
 ]

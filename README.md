@@ -17,8 +17,46 @@ private.
 
 ---
 
+## Getting started
+
+One line per platform. It clones Penelope, installs only what is missing
+(Ollama, uv, Node — it asks before each), pulls the models, and links the
+`penelope` launcher. Safe to re-run; it skips whatever is already in place.
+
+**macOS**
+
+```bash
+git clone https://github.com/defaltho/Penelope.git && cd Penelope && bin/setup
+```
+
+**Linux**
+
+```bash
+git clone https://github.com/defaltho/Penelope.git && cd Penelope && bin/setup
+```
+
+**Windows** (PowerShell)
+
+```powershell
+git clone https://github.com/defaltho/Penelope.git; cd Penelope; .\bin\setup.cmd
+```
+
+Then start everything (Ollama + backend + frontend, opens
+<http://localhost:5173>; `Ctrl+C` stops it):
+
+```bash
+penelope            # macOS / Linux
+.\bin\penelope.cmd  # Windows
+```
+
+Prefer to do it step by step, or already have the prerequisites? See
+[Quick start](#quick-start) and [Manual setup](#manual-setup).
+
+---
+
 ## Table of contents
 
+- [Getting started](#getting-started)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
@@ -29,6 +67,7 @@ private.
 - [Security](#security)
 - [Credits and attributions](#credits-and-attributions)
 - [Documentation](#documentation)
+- [License](#license)
 
 ---
 
@@ -287,3 +326,14 @@ public model configuration, in the spirit of giving due credit.
 ## Documentation
 
 - [`CLAUDE.md`](CLAUDE.md): full technical context and architecture decisions.
+
+---
+
+## License
+
+Penelope is released under the [MIT License](LICENSE) — free to use, modify and
+distribute, including commercially, with attribution. See [`LICENSE`](LICENSE)
+for the full text.
+
+The credited projects above keep their own licenses; Penelope reuses ideas and
+public model configuration, not their code.

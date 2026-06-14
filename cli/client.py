@@ -33,6 +33,11 @@ class PenelopeClient:
         params = {"q": q} if q else {}
         return self.client.get("/memory/facts", params=params).json()
 
+    # -- Skills --
+
+    def list_skills(self) -> list[dict]:
+        return self.client.get("/skills").json()
+
     # -- Notes --
 
     def list_notes(self) -> list[dict]:
