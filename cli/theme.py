@@ -1,7 +1,7 @@
 """Penelope TUI — One Dark theme constants and animated indicators."""
 from __future__ import annotations
 
-VERSION = "0.2.0"
+VERSION = "1.5"
 BRAND = "penelope"
 PROMPT_SYMBOL = "› "
 
