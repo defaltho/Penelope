@@ -926,9 +926,14 @@
 
 	.body {
 		color: var(--fg-strong);
-		font-family: var(--font-body);
+		font-family: var(--font-ui);
 		font-size: 14.5px;
 		white-space: pre-wrap;
+	}
+	/* Serif (--font-body) reservado ao OUTPUT da LLM, para leitura.
+	   As mensagens do utilizador ficam em sans (--font-ui), como o resto da UI. */
+	.msg-ai .body {
+		font-family: var(--font-body);
 	}
 	.msg.error .body {
 		color: #ffd9d4;
