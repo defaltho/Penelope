@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# setup — one-time bootstrap for Penelope on a fresh machine (macOS/Linux).
+#
+# Installs the missing prerequisites (Ollama, uv, Node), pulls the models, and
+# links the `penelope` launcher onto your PATH. It asks before installing
+# anything and is safe to re-run: it skips whatever is already in place.
+
+set -euo pipefail
+
+# --- Resolve the project root, following the symlink if any -------------------
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+ROOT="$(cd "$BIN_DIR/.." >/dev/null 2>&1 && pwd)"
+
+CHAT_MODEL="qwen3-vl:8b"
+EMBED_MODEL="embeddinggemma"
+OLLAMA_URL="http://127.0.0.1:11434"
+OS="$(uname -s)"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ask() { # $1 = prompt; returns 0 (yes) on empty/Y/y
+	local reply
+	printf "penelope setup: %s [Y/n] " "$1"
+	read -r reply || true
+	[[ -z "$reply" || "$reply" =~ ^[Yy] ]]
+}
+
+echo "penelope setup: project root = $ROOT  (OS: $OS)"
+
+# --- Homebrew helper (macOS) --------------------------------------------------
+ensure_brew() {
+	have brew && return 0
+	[ "$OS" = "Darwin" ] || return 1
+	if ask "Homebrew is needed to install this. Install Homebrew now?"; then
+		/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+		[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"
+		[ -x /usr/local/bin/brew ] && eval "$(/usr/local/bin/brew shellenv)"
+	fi
+	have brew
+}
+
+# --- 1) Ollama ----------------------------------------------------------------
+if have ollama; then
+	echo "penelope setup: Ollama is installed."
+elif ask "Ollama is not installed. Install it now?"; then
+	if [ "$OS" = "Darwin" ]; then
+		ensure_brew && { brew install --cask ollama || brew install ollama; }
+	else
+		curl -fsSL https://ollama.com/install.sh | sh
+	fi
+else
+	echo "penelope setup: skipping Ollama (install it later from https://ollama.com)."
+fi
+
+# --- 2) uv (Python toolchain) -------------------------------------------------
+if have uv; then
+	echo "penelope setup: uv is installed."
+elif ask "uv (Python package manager) is not installed. Install it now?"; then
+	curl -LsSf https://astral.sh/uv/install.sh | sh
+	export PATH="$HOME/.local/bin:$PATH"
+else
+	echo "penelope setup: skipping uv (install it later from https://docs.astral.sh/uv/)."
+fi
+
+# --- 3) Node.js ---------------------------------------------------------------
+if have node && have npm; then
+	echo "penelope setup: Node.js is installed."
+elif ask "Node.js is not installed. Install it now?"; then
+	if [ "$OS" = "Darwin" ]; then
+		ensure_brew && brew install node
+	elif have apt-get; then
+		curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+		sudo apt-get install -y nodejs
+	else
+		echo "penelope setup: please install Node.js from https://nodejs.org and re-run." >&2
+	fi
+else
+	echo "penelope setup: skipping Node.js (install it later from https://nodejs.org)."
+fi
+
+# --- 4) Pull the models (start Ollama briefly if needed) ----------------------
+if have ollama; then
+	OLLAMA_PID=""
+	if ! curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+		echo "penelope setup: starting Ollama to pull models…"
+		ollama serve >/dev/null 2>&1 &
+		OLLAMA_PID=$!
+		for _ in $(seq 1 60); do
+			curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1 && break
+			sleep 0.5
+		done
+	fi
+	for m in "$CHAT_MODEL" "$EMBED_MODEL"; do
+		if ollama list 2>/dev/null | grep -q "$m"; then
+			echo "penelope setup: model $m already present."
+		else
+			echo "penelope setup: pulling $m … (this can take a while)"
+			ollama pull "$m"
+		fi
+	done
+	[ -n "$OLLAMA_PID" ] && kill "$OLLAMA_PID" 2>/dev/null || true
+fi
+
+# --- 5) Link the launcher onto the PATH ---------------------------------------
+TARGET="$HOME/.local/bin/penelope"
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+	echo "penelope setup: launcher already linked at $TARGET"
+elif ask "Link the 'penelope' command into ~/.local/bin?"; then
+	mkdir -p "$HOME/.local/bin"
+	ln -s "$BIN_DIR/penelope" "$TARGET"
+	echo "penelope setup: linked $TARGET"
+	case ":$PATH:" in
+		*":$HOME/.local/bin:"*) ;;
+		*) echo "penelope setup: add ~/.local/bin to your PATH, e.g. in ~/.zshrc:"
+		   echo '             export PATH="$HOME/.local/bin:$PATH"' ;;
+	esac
+fi
+
+echo ""
+echo "penelope setup: done. Start it with 'penelope' (or '$BIN_DIR/penelope')."

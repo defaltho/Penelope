@@ -4,6 +4,9 @@
 		listFacts,
 		editFact,
 		deleteFact,
+		listArchivedFacts,
+		restoreFact,
+		purgeFact,
 		exportFacts,
 		importFacts,
 		listPending,
@@ -37,6 +40,8 @@
 	let { onClose, inline = false }: { onClose?: () => void; inline?: boolean } = $props();
 
 	let facts = $state<Fact[]>([]);
+	let archived = $state<Fact[]>([]);
+	let showArchived = $state(false);
 	let query = $state('');
 	let typeFilter = $state<string | null>(null);
 	let loading = $state(false);
@@ -90,9 +95,32 @@
 		else if (e.key === 'Escape') editingId = null;
 	}
 	async function remove(f: Fact) {
-		if (!confirm('Apagar este facto?')) return;
+		// Apagar = arquivar (recuperável). Sem confirmação: é reversível.
 		await deleteFact(f.id);
 		facts = facts.filter((x) => x.id !== f.id);
+		if (showArchived) await loadArchived();
+	}
+
+	async function loadArchived() {
+		try {
+			archived = await listArchivedFacts();
+		} catch (e) {
+			console.error('falha a listar arquivados', e);
+		}
+	}
+	async function toggleArchived() {
+		showArchived = !showArchived;
+		if (showArchived) await loadArchived();
+	}
+	async function restore(f: Fact) {
+		archived = archived.filter((x) => x.id !== f.id);
+		await restoreFact(f.id);
+		await load();
+	}
+	async function purge(f: Fact) {
+		if (!confirm('Apagar DEFINITIVAMENTE? Esta ação não é recuperável.')) return;
+		archived = archived.filter((x) => x.id !== f.id);
+		await purgeFact(f.id);
 	}
 
 	async function doExport() {
@@ -132,6 +160,14 @@
 		<header class="panel-head">
 			<h2><span class="dot"></span>Memória <span class="count">{facts.length}</span></h2>
 			<div class="head-actions">
+				<button
+					class="io-btn"
+					class:active={showArchived}
+					onclick={toggleArchived}
+					title="Arquivados"
+				>
+					<Icon name="archive" size={14} /> {showArchived ? 'ativos' : 'arquivados'}
+				</button>
 				<button class="io-btn" onclick={doImport} title="Importar">
 					<Icon name="upload" size={14} /> importar
 				</button>
@@ -181,6 +217,23 @@
 			</div>
 		{/if}
 
+		{#if showArchived}
+			<div class="fact-list">
+				{#if archived.length === 0}
+					<p class="muted">nenhum facto arquivado</p>
+				{/if}
+				{#each archived as f (f.id)}
+					<div class="fact">
+						<span class="tag tag-{f.fact_type}">{f.fact_type}</span>
+						<span class="fact-text archived-text">{f.text}</span>
+						<div class="fact-actions">
+							<button onclick={() => restore(f)} title="Restaurar" aria-label="Restaurar">↺</button>
+							<button onclick={() => purge(f)} title="Apagar definitivo" aria-label="Apagar definitivo">🗑</button>
+						</div>
+					</div>
+				{/each}
+			</div>
+		{:else}
 		<div class="fact-list">
 			{#if loading}
 				<p class="muted">a carregar…</p>
@@ -210,6 +263,7 @@
 				</div>
 			{/each}
 		</div>
+		{/if}
 	</div>
 </div>
 
@@ -320,6 +374,14 @@
 	.io-btn:hover {
 		color: var(--accent);
 		border-color: var(--accent);
+	}
+	.io-btn.active {
+		color: var(--accent);
+		border-color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+	}
+	.archived-text {
+		opacity: 0.7;
 	}
 
 	.controls {

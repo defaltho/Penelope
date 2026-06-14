@@ -71,6 +71,54 @@ pela lógica de dados — são as únicas áreas com overlap real.
 
 ## hermes-agent — `NousResearch/hermes-agent`
 
-**Estado:** A verificar — referência para streaming / tool-use patterns.
+**Última verificação:** 2026-06-13
 
-*Notas a adicionar após verificação.*
+### O que o hermes-agent se tornou
+
+O hermes-agent (por Teknium/NousResearch) é uma plataforma de agente AI massiva:
+
+- **Escala:** ficheiros únicos de 200–600KB (`cli.py` 638KB, `run_agent.py` 239KB, `gateway.py` 268KB, `web_server.py` 464KB, `main.py` 495KB, `hermes_state.py` 205KB)
+- **Multi-plataforma:** gateway para Telegram, WhatsApp, WeCom, Matrix, DingTalk, QQ, Slack…
+- **Multi-provider:** Gemini, Codex, modelos custom, OpenAI-compat
+- **Multi-user:** auth, pairing, perfis, grupos
+- **Sistemas adicionais:** Kanban (`kanban_db.py` 316KB), skills, plugins, ACP adapter, MCP server, TUI, dashboard web
+
+Isto diverge completamente da filosofia do Penelope:
+
+| Dimensão | hermes-agent | Penelope |
+|---|---|---|
+| Escala | Monolito gigante | Single-purpose, ficheiros pequenos |
+| Plataformas | 10+ gateways | CLI + web local |
+| Utilizadores | Multi-user com auth/pairing | Single-user |
+| LLM | Cloud multi-provider | Ollama local |
+| Extras | Kanban, dashboard, voice, skills hub | Fora de escopo |
+
+### O que foi portado (histórico)
+
+O `StreamRenderer` do CLI da Penelope foi inspirado no padrão de streaming do hermes-agent — especificamente como o CLI consome chunks SSE e os renderiza incrementalmente. Este port já está feito.
+
+**`hermes_cli/stdio.py`** (10KB) — o único ficheiro com sobreposição directa ainda relevante:
+- Windows UTF-8 stdio fix: `SetConsoleCP(65001)` + `reconfigure(encoding='utf-8')`
+- O Penelope no Windows pode ter o mesmo problema se o CLI imprimir box-drawing/emoji
+
+### Commits recentes com possível relevância
+
+#### ✓ Potencialmente útil
+
+- **fix: keep CLI idle timer ticking** (`6724daa`, 2026-06-13)
+  — Se o CLI da Penelope tiver um timer de idle para fechar sessões, este fix pode ser relevante.
+  **Verificar se o Penelope CLI tem idle timeout implementado.**
+
+#### ✗ Não aplicável
+
+- Fixes de gateway (Telegram, WeCom, Matrix, WhatsApp) — fora de escopo
+- Fixes de auth/allowlists/security gating — Penelope é single-user sem rede exposta
+- Gemini/Codex provider fixes — Penelope usa só Ollama
+- Dashboard, kanban, profiles, plugins — fora de escopo
+- Windows bootstrap recovery (startup PS1 + venv) — Penelope arranca com `uvicorn` directamente
+
+### Conclusão
+
+O hermes-agent deixou de ser uma referência prática para o Penelope — é um projecto de escala e filosofia completamente diferentes. A inspiração manteve-se no `StreamRenderer` (já portado) e no `stdio.py` para suporte Windows.
+
+**Recomendação:** não monitorizar activamente. Verificar `hermes_cli/stdio.py` apenas se o CLI da Penelope apresentar problemas de encoding no Windows.

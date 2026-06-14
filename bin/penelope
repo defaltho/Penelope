@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# penelope — arranca a Penelope com um só comando (como `claude`).
+# penelope — start Penelope with a single command (like `claude`).
 #
-# Sobe (se preciso) o Ollama, o backend (FastAPI/uvicorn :8000) e o frontend
-# (SvelteKit/Vite :5173), espera o frontend e abre o browser. Ctrl+C encerra tudo.
+# Brings up (if needed) Ollama, the backend (FastAPI/uvicorn :8000) and the
+# frontend (SvelteKit/Vite :5173), waits for the frontend and opens the browser.
+# Ctrl+C stops everything.
 #
-# Instalação: ligado a ~/.local/bin/penelope. Edita este ficheiro no repo.
+# Install: linked at ~/.local/bin/penelope. Edit this file in the repo.
+# First time on a fresh machine? Run `bin/setup` once.
 
 set -euo pipefail
 
-# --- Resolver a raiz do projeto, seguindo o symlink de ~/.local/bin -----------
+# --- Resolve the project root, following the ~/.local/bin symlink -------------
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
 	DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
@@ -29,44 +31,56 @@ OLLAMA_PID=""
 
 cleanup() {
 	echo ""
-	echo "penelope: a encerrar…"
+	echo "penelope: shutting down…"
 	for pid in "${PIDS[@]:-}"; do
 		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
 	done
-	# Só matamos o Ollama se fomos NÓS a arrancá-lo.
+	# Only stop Ollama if WE started it.
 	[ -n "$OLLAMA_PID" ] && kill "$OLLAMA_PID" 2>/dev/null || true
 	exit 0
 }
 trap cleanup INT TERM
 
-wait_for() { # $1 = url, $2 = nome, $3 = tentativas
+wait_for() { # $1 = url, $2 = name, $3 = attempts
 	local i=0
 	until curl -fsS "$1" >/dev/null 2>&1; do
 		i=$((i + 1))
 		if [ "$i" -ge "${3:-60}" ]; then
-			echo "penelope: $2 não respondeu a tempo." >&2
+			echo "penelope: $2 did not respond in time." >&2
 			return 1
 		fi
 		sleep 0.5
 	done
 }
 
-echo "penelope: raiz do projeto = $ROOT"
+echo "penelope: project root = $ROOT"
 
 # --- 1) Ollama ----------------------------------------------------------------
 if curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
-	echo "penelope: Ollama já está a correr."
+	echo "penelope: Ollama is already running."
 elif command -v ollama >/dev/null 2>&1; then
-	echo "penelope: a arrancar o Ollama…"
+	echo "penelope: starting Ollama…"
 	ollama serve >/dev/null 2>&1 &
 	OLLAMA_PID=$!
 	wait_for "${OLLAMA_URL}/api/tags" "Ollama" 60 || true
 else
-	echo "penelope: AVISO — 'ollama' não encontrado. Instala/abre o Ollama e tenta de novo." >&2
+	echo "penelope: WARNING — 'ollama' not found. Run 'bin/setup' or install it from https://ollama.com." >&2
+fi
+
+# --- 1b) Make sure the required models are present ----------------------------
+if command -v ollama >/dev/null 2>&1 && curl -fsS "${OLLAMA_URL}/api/tags" >/dev/null 2>&1; then
+	ensure_model() { # $1 = tag to pull, $2 = grep pattern for an acceptable match
+		if ! ollama list 2>/dev/null | grep -qi "$2"; then
+			echo "penelope: model missing, pulling $1 … (first run only)"
+			ollama pull "$1" || echo "penelope: failed to pull $1 (try 'bin/setup')." >&2
+		fi
+	}
+	ensure_model "qwen3-vl:8b" "qwen3-vl"
+	ensure_model "embeddinggemma" "embeddinggemma"
 fi
 
 # --- 2) Backend (FastAPI) -----------------------------------------------------
-echo "penelope: a arrancar o backend (:${BACKEND_PORT})…"
+echo "penelope: starting the backend (:${BACKEND_PORT})…"
 (
 	cd "$ROOT/backend"
 	exec uv run uvicorn main:app --host 127.0.0.1 --port "$BACKEND_PORT"
@@ -75,25 +89,25 @@ PIDS+=($!)
 
 # --- 3) Frontend (Vite) -------------------------------------------------------
 if [ ! -d "$ROOT/frontend/node_modules" ]; then
-	echo "penelope: a instalar dependências do frontend (1ª vez)…"
+	echo "penelope: installing frontend dependencies (first run)…"
 	(cd "$ROOT/frontend" && npm install)
 fi
-echo "penelope: a arrancar o frontend (:${FRONTEND_PORT})…"
+echo "penelope: starting the frontend (:${FRONTEND_PORT})…"
 (
 	cd "$ROOT/frontend"
 	exec npm run dev -- --port "$FRONTEND_PORT" --strictPort
 ) &
 PIDS+=($!)
 
-# --- 4) Esperar e abrir o browser --------------------------------------------
+# --- 4) Wait and open the browser --------------------------------------------
 if wait_for "$APP_URL" "frontend" 80; then
-	echo "penelope: pronto -> $APP_URL"
+	echo "penelope: ready -> $APP_URL"
 	if command -v open >/dev/null 2>&1; then
 		open "$APP_URL" || true
 	fi
 else
-	echo "penelope: abre manualmente $APP_URL" >&2
+	echo "penelope: open $APP_URL manually" >&2
 fi
 
-echo "penelope: a correr. Carrega Ctrl+C para parar tudo."
+echo "penelope: running. Press Ctrl+C to stop everything."
 wait

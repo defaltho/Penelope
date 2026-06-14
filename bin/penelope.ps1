@@ -1,90 +1,40 @@
 #!/usr/bin/env pwsh
 #
-# penelope.ps1 — arranca a Penelope com um só comando no Windows (PowerShell 5.1+ ou 7+).
+# penelope.ps1 — unified launcher for Penelope on Windows.
 #
-# Sobe (se preciso) o Ollama, o backend (FastAPI/uvicorn :8000) e o frontend
-# (SvelteKit/Vite :5173), espera o frontend e abre o browser. Ctrl+C / fechar a
-# janela encerra os processos-filho.
+# Usage:
+#   penelope              → interactive TUI (terminal chat)
+#   penelope web          → start the full web stack (backend + frontend + browser)
+#   penelope <command>    → pass-through to the CLI (status, chat, task, etc.)
 #
-# Uso: a partir de qualquer pasta, `penelope` (via bin\penelope.cmd no PATH) ou
-#      `pwsh -File bin\penelope.ps1`.
+# First time? Run `bin\setup.cmd` once.
 
 $ErrorActionPreference = 'Stop'
 
-# Raiz do projeto = pasta acima de bin\.
 $Root = Split-Path -Parent $PSScriptRoot
-$BackendPort = 8000
-$FrontendPort = 5173
-$OllamaUrl = 'http://127.0.0.1:11434'
-$AppUrl = "http://localhost:$FrontendPort"
+$Venv = Join-Path $Root 'backend\.venv\Scripts\python.exe'
 
-function Test-Url($url) {
-	try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri $url | Out-Null; return $true }
-	catch { return $false }
-}
-function Wait-Url($url, $tries = 80) {
-	for ($i = 0; $i -lt $tries; $i++) {
-		if (Test-Url $url) { return $true }
-		Start-Sleep -Milliseconds 500
-	}
-	return $false
+if (-not (Test-Path $Venv)) {
+    Write-Warning "penelope: venv not found at $Venv. Run 'bin\setup.cmd' first."
+    exit 1
 }
 
-Write-Host "penelope: raiz do projeto = $Root"
+# --- Route by first argument ---
 
-$ollama = $null
-$backend = $null
-$frontend = $null
+$sub = if ($args.Count -gt 0) { $args[0] } else { $null }
 
+if ($sub -eq 'web') {
+    # Launch the full web stack (Ollama + backend + frontend + browser).
+    & $PSScriptRoot\penelope-web.ps1 @($args | Select-Object -Skip 1)
+    exit $LASTEXITCODE
+}
+
+# Everything else goes to `python -m cli` from the project root.
+Push-Location $Root
 try {
-	# --- 1) Ollama ---
-	if (Test-Url "$OllamaUrl/api/tags") {
-		Write-Host 'penelope: Ollama já está a correr.'
-	}
-	elseif (Get-Command ollama -ErrorAction SilentlyContinue) {
-		Write-Host 'penelope: a arrancar o Ollama…'
-		$ollama = Start-Process ollama -ArgumentList 'serve' -PassThru -WindowStyle Hidden
-		Wait-Url "$OllamaUrl/api/tags" 60 | Out-Null
-	}
-	else {
-		Write-Warning "penelope: 'ollama' não encontrado. Instala/abre o Ollama e tenta de novo."
-	}
-
-	# --- 2) Backend (FastAPI) ---
-	Write-Host "penelope: a arrancar o backend (:$BackendPort)…"
-	$backend = Start-Process uv -PassThru -WorkingDirectory "$Root\backend" `
-		-ArgumentList @('run', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', "$BackendPort")
-
-	# --- 3) Frontend (Vite) ---
-	if (-not (Test-Path "$Root\frontend\node_modules")) {
-		Write-Host 'penelope: a instalar dependências do frontend (1ª vez)…'
-		Push-Location "$Root\frontend"
-		npm install
-		Pop-Location
-	}
-	Write-Host "penelope: a arrancar o frontend (:$FrontendPort)…"
-	$frontend = Start-Process npm -PassThru -WorkingDirectory "$Root\frontend" `
-		-ArgumentList @('run', 'dev', '--', '--port', "$FrontendPort", '--strictPort')
-
-	# --- 4) Esperar e abrir o browser ---
-	if (Wait-Url $AppUrl 80) {
-		Write-Host "penelope: pronto -> $AppUrl"
-		Start-Process $AppUrl
-	}
-	else {
-		Write-Warning "penelope: abre manualmente $AppUrl"
-	}
-
-	Write-Host 'penelope: a correr. Carrega Ctrl+C (ou fecha a janela) para parar tudo.'
-	# Bloqueia enquanto o backend viver.
-	Wait-Process -Id $backend.Id
+    & $Venv -m cli @args
 }
 finally {
-	Write-Host ''
-	Write-Host 'penelope: a encerrar…'
-	foreach ($p in @($frontend, $backend)) {
-		if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-	}
-	# Só matamos o Ollama se fomos NÓS a arrancá-lo.
-	if ($ollama -and -not $ollama.HasExited) { Stop-Process -Id $ollama.Id -Force -ErrorAction SilentlyContinue }
+    Pop-Location
 }
+exit $LASTEXITCODE

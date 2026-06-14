@@ -982,8 +982,12 @@ async def _agent_tool(conn, memory, name: str, args: dict) -> str:
 
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
                 r = await c.get(url, headers={"User-Agent": "Penelope/1.0"})
-            txt = _re2.sub(r"<[^>]+>", " ", r.text)
-            txt = _re2.sub(r"\s+", " ", txt).strip()
+            ct = r.headers.get("content-type", "")
+            if "text/html" in ct:
+                txt = _re2.sub(r"<[^>]+>", " ", r.text)
+                txt = _re2.sub(r"\s+", " ", txt).strip()
+            else:
+                txt = r.text.strip()
             return f"Conteúdo de {url} (truncado): {txt[:1500]}"
         except Exception as e:  # noqa: BLE001
             return f"erro ao abrir página: {e}"

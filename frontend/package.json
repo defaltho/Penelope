@@ -1,7 +1,7 @@
 {
-	"name": "frontend",
+	"name": "penelope-frontend",
 	"private": true,
-	"version": "0.0.1",
+	"version": "1.2.0",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
@@ -15,6 +15,7 @@
 		"@sveltejs/adapter-auto": "^7.0.1",
 		"@sveltejs/kit": "^2.57.0",
 		"@sveltejs/vite-plugin-svelte": "^7.0.0",
+		"@types/node": "^25.9.2",
 		"svelte": "^5.55.2",
 		"svelte-check": "^4.4.6",
 		"typescript": "^6.0.2",

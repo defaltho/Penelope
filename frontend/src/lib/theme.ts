@@ -86,3 +86,23 @@ export function setTheme(name: string): void {
 	applyTheme(name);
 	saveTheme(name);
 }
+
+// --- Indicadores de progresso (estilo skin engine do Hermes, em TS local) ---
+// Frames de spinner Braille (suaves) e verbos rotativos por tema, para o feedback
+// "vivo" enquanto o modelo trabalha. Data-driven: trocar de tema troca a animação.
+export const SPINNER_FRAMES = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'.split('');
+
+const VERBS_DEFAULT = ['a pensar', 'a escrever', 'a ligar ideias', 'a compor'];
+export const THINKING_VERBS: Record<string, string[]> = {
+	terminal: ['a compilar', 'a processar', 'a executar', 'a iterar'],
+	cyberpunk: ['a hackear', 'a injetar', 'a decifrar', 'a compilar'],
+	forest: ['a germinar ideias', 'a enraizar', 'a florescer', 'a crescer'],
+	ocean: ['a navegar', 'a sondar correntes', 'a mergulhar', 'a traçar a rota'],
+	claude: ['a pensar', 'a raciocinar', 'a ponderar', 'a redigir'],
+	gpt: ['a pensar', 'a gerar', 'a compor', 'a refinar']
+};
+
+/** Verbos do tema atual (ou os default). */
+export function spinnerVerbs(theme: string): string[] {
+	return THINKING_VERBS[theme] ?? VERBS_DEFAULT;
+}

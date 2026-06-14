@@ -1,12 +1,22 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
-	import { agentRun, type AgentStep } from '$lib/api';
+	import {
+		agentRun,
+		agentResume,
+		type AgentStep,
+		type AgentPending,
+		type AgentRunResult,
+		type AgentDecision
+	} from '$lib/api';
 
 	let task = $state('');
 	let busy = $state(false);
 	let steps = $state<AgentStep[]>([]);
 	let final = $state<string | null>(null);
 	let error = $state<string | null>(null);
+	// Aprovação inline de ferramentas perigosas (B8).
+	let pending = $state<AgentPending | null>(null);
+	let pendState = $state<Record<string, unknown> | null>(null);
 
 	const EXAMPLES = [
 		'Que horas são?',
@@ -14,6 +24,20 @@
 		'Adiciona uma tarefa: ligar ao dentista.',
 		'O que sabes sobre mim?'
 	];
+
+	function applyResult(r: AgentRunResult) {
+		steps = r.steps;
+		if (r.pending) {
+			// O agente quer correr uma ferramenta perigosa: espera decisão do utilizador.
+			pending = r.pending;
+			pendState = r.state ?? null;
+			final = null;
+		} else {
+			pending = null;
+			pendState = null;
+			final = r.final;
+		}
+	}
 
 	async function run(t?: string) {
 		const text = (t ?? task).trim();
@@ -23,12 +47,30 @@
 		error = null;
 		steps = [];
 		final = null;
+		pending = null;
+		pendState = null;
 		try {
-			const r = await agentRun(text);
-			steps = r.steps;
-			final = r.final;
+			applyResult(await agentRun(text));
 		} catch (e) {
 			error = 'o agente falhou (modelo a carregar? tenta de novo)';
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function decide(decision: AgentDecision) {
+		if (!pending || !pendState) return;
+		const p = pending;
+		const st = pendState;
+		pending = null; // esconde o prompt enquanto retoma
+		busy = true;
+		error = null;
+		try {
+			applyResult(await agentResume(st, p, decision));
+		} catch (e) {
+			error = 'falha a retomar o agente';
+			pending = p; // repõe o prompt para o utilizador tentar de novo
+			pendState = st;
 		} finally {
 			busy = false;
 		}
@@ -85,6 +127,23 @@
 						</div>
 					{/if}
 				{/each}
+			</div>
+		{/if}
+
+		{#if pending}
+			<div class="approval">
+				<div class="ap-head">
+					<Icon name="zap" size={14} /> Pedido de execução: <code>{pending.tool}</code>
+				</div>
+				{#if pending.thought}<p class="ap-thought">{pending.thought}</p>{/if}
+				<code class="ap-args">{pending.tool}({JSON.stringify(pending.args)})</code>
+				<p class="ap-warn">Esta ferramenta tem acesso total à máquina. Aprovar só se confias na ação.</p>
+				<div class="ap-actions">
+					<button class="ap-allow" onclick={() => decide('allow_once')}>permitir uma vez</button>
+					<button class="ap-allow" onclick={() => decide('allow_session')}>nesta sessão</button>
+					<button class="ap-allow" onclick={() => decide('allow_always')}>sempre</button>
+					<button class="ap-deny" onclick={() => decide('deny')}>negar</button>
+				</div>
 			</div>
 		{/if}
 
@@ -286,6 +345,71 @@
 		line-height: 1.5;
 		color: var(--fg-strong);
 		white-space: pre-wrap;
+	}
+
+	.approval {
+		margin-top: 16px;
+		border: 1px solid color-mix(in srgb, var(--red) 50%, var(--border));
+		border-radius: 14px;
+		padding: 14px 16px;
+		background: color-mix(in srgb, var(--red) 8%, transparent);
+	}
+	.ap-head {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--fg-strong);
+	}
+	.ap-head code {
+		font-family: var(--font-ui);
+		color: var(--red);
+	}
+	.ap-thought {
+		margin: 8px 0 4px;
+		font-size: 13px;
+		color: var(--fg);
+	}
+	.ap-args {
+		display: block;
+		font-family: var(--font-ui);
+		font-size: 12px;
+		color: var(--fg-muted);
+		margin: 4px 0;
+		word-break: break-all;
+	}
+	.ap-warn {
+		margin: 8px 0 12px;
+		font-size: 12px;
+		color: var(--red);
+	}
+	.ap-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.ap-allow,
+	.ap-deny {
+		font: inherit;
+		font-size: 12.5px;
+		padding: 7px 13px;
+		border-radius: 9px;
+		cursor: pointer;
+		border: 1px solid var(--border);
+		background: transparent;
+		color: var(--fg-strong);
+	}
+	.ap-allow:hover {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+	.ap-deny {
+		color: var(--red);
+		border-color: color-mix(in srgb, var(--red) 50%, transparent);
+	}
+	.ap-deny:hover {
+		background: color-mix(in srgb, var(--red) 14%, transparent);
 	}
 
 	.dots {

@@ -1,322 +1,331 @@
-# CLAUDE.md — Assistente Local-First (chat + memória + OCR/pipeline)
+# CLAUDE.md — Local-First Assistant (chat + memory + OCR/pipeline)
 
-> Este ficheiro dá ao Claude Code o contexto COMPLETO do projeto, incluindo a
-> investigação que fundamenta cada decisão técnica. Lê-o por inteiro antes de
-> construir. Datas e versões válidas a junho de 2026.
-
----
-
-## 1. Visão geral e objetivo
-
-Assistente de IA **local-first**, a correr **offline**, com **memória persistente
-de longo prazo** que aprende continuamente com as interações, **OCR/visão** via
-modelo multimodal local, e um **pipeline de automação** que estrutura texto e
-imagens em JSON e os envia para um software de destino próprio (ainda por
-construir, do tipo gestão de finanças pessoais privada — referência:
-whisper-money).
-
-Multilingue, com **qualidade excecional em Inglês e Português**.
-
-**Filosofia:** inspirado no estilo visual / UX / local-first do projeto Odysseus
-(do PewDiePie), mas MUITO mais minimalista e leve. ELIMINAR explicitamente as
-ferramentas pesadas do Odysseus — agentes autónomos, deep research, email,
-calendário, geração de imagens — que sobrecarregariam o hardware modesto.
-Focar APENAS em: **chat, memória persistente, pipeline de estruturação texto+imagem.**
+> This file gives Claude Code the COMPLETE context of the project, including the
+> research that backs each technical decision. Read it in full before building.
+> Dates and versions valid as of June 2026.
 
 ---
 
-## 2. Hardware-alvo
+## 1. Overview and goal
 
-| Máquina | Specs | Papel |
+A **local-first** AI assistant, running **offline**, with **persistent long-term
+memory** that continuously learns from interactions, **OCR/vision** via a local
+multimodal model, and an **automation pipeline** that structures text and images
+into JSON and sends them to a target application of its own (still to be built, of
+the private personal-finance management kind).
+
+Multilingual, with **excellent quality in English and Portuguese**.
+
+**Philosophy:** inspired by the visual style / UX / local-first nature of projects
+like Odysseus (by PewDiePie) and Hermes Agent (Nous Research), but more minimalist
+and lightweight, tuned to the target hardware. The historical core is: **chat,
+persistent memory, text+image structuring pipeline.** The project is **open to
+changing direction** (new features, patterns adopted from other projects), but each
+addition is evaluated case by case against the local-first invariant and the hardware
+budget: anything that would overload the modest machine (e.g. heavy autonomous agents,
+deep research, image generation) stays out of scope until there is a lightweight,
+offline way to do it.
+
+> **Non-negotiable invariant: local-first, always.** Penelope runs offline, with the
+> data on the user's machine, with no dependency on cloud services on the main path.
+> Any change of direction is evaluated first against this invariant.
+
+---
+
+## 2. Target hardware
+
+| Machine | Specs | Role |
 |---|---|---|
-| **Mac (prototipar AQUI primeiro)** | M5 Pro, 24GB memória unificada, MLX, 307 GB/s bandwidth | Desenvolvimento e protótipo |
-| **Windows (portar depois)** | RTX 3060 8GB VRAM, i7-10700, 32GB RAM, CUDA | Deployment secundário |
+| **Mac (prototype HERE first)** | M5 Pro, 24GB unified memory, MLX, 307 GB/s bandwidth | Development and prototype |
+| **Windows (port later)** | RTX 3060 8GB VRAM, i7-10700, 32GB RAM, CUDA | Secondary deployment |
 
-A arquitetura é **idêntica** nas duas máquinas. A única diferença é o modelo
-principal no config (8b no Mac, 4b no Windows). Todo o resto — SQLite, embeddings
-em CPU, FastAPI, SvelteKit — é cross-platform sem alterações.
+The architecture is **identical** on both machines. The only difference is the main
+model in the config (8b on the Mac, 4b on Windows). Everything else — SQLite, CPU
+embeddings, FastAPI, SvelteKit — is cross-platform with no changes.
 
-### Princípio-chave de hardware (CRÍTICO)
-Embeddings (EmbeddingGemma) e busca vetorial (sqlite-vec) correm **em CPU/SQLite**
-e consomem **ZERO VRAM**. Toda a VRAM (8GB no 3060) / memória unificada (24GB no
-Mac) fica dedicada ao modelo Qwen3-VL. Esta decisão é o que torna o projeto viável
-nos 8GB do RTX 3060.
+### Key hardware principle (CRITICAL)
+Embeddings (EmbeddingGemma) and vector search (sqlite-vec) run **on CPU/SQLite** and
+consume **ZERO VRAM**. All the VRAM (8GB on the 3060) / unified memory (24GB on the
+Mac) stays dedicated to the Qwen3-VL model. This decision is what makes the project
+viable on the RTX 3060's 8GB.
 
 ---
 
-## 3. Modelos (estado real a junho de 2026)
+## 3. Models (real state as of June 2026)
 
-### Escolhas finais
-| Função | Mac (M5 Pro 24GB) | Windows (RTX 3060 8GB) | Notas |
+### Final choices
+| Function | Mac (M5 Pro 24GB) | Windows (RTX 3060 8GB) | Notes |
 |---|---|---|---|
-| Chat + Visão + OCR | **qwen3-vl:8b** (~6.1GB) | **qwen3-vl:4b** (Q4_K_M, ~3.3GB) | Modelo único: chat e OCR no mesmo modelo, sem custo de troca |
-| Chat alternativo (EN/PT) | gemma4:12b-mlx | gemma4:e4b | Gemma tem afinação mais forte em línguas europeias |
-| Embeddings | embeddinggemma (CPU) | embeddinggemma (CPU) | 300M params, 100+ línguas, corre em <200MB RAM |
+| Chat + Vision + OCR | **qwen3-vl:8b** (~6.1GB) | **qwen3-vl:4b** (Q4_K_M, ~3.3GB) | Single model: chat and OCR on the same model, no switching cost |
+| Alternative chat (EN/PT) | gemma4:12b-mlx | gemma4:e4b | Gemma has stronger tuning for European languages |
+| Embeddings | embeddinggemma (CPU) | embeddinggemma (CPU) | 300M params, 100+ languages, runs in <200MB RAM |
 
-**Requisito Ollama:** ≥ 0.12.7 (necessário para Qwen3-VL).
+**Ollama requirement:** ≥ 0.12.7 (needed for Qwen3-VL).
 
-### Porquê um único modelo multimodal (decisão central)
-Usar o Qwen3-VL como chat E como OCR/visão é a decisão mais importante para os 8GB.
-Como já está carregado para chat, os pedidos de imagem não pagam penalização de
-troca de modelo. Em 8GB isto é decisivo.
+### Why a single multimodal model (central decision)
+Using Qwen3-VL as both chat AND OCR/vision is the most important decision for the 8GB.
+Since it is already loaded for chat, image requests pay no model-switch penalty. On
+8GB this is decisive.
 
-### Benchmarks que sustentam a escolha (OCR/visão)
-- **Qwen3-VL-8B**: DocVQA 96.1%, OCRBench 89.6% (duas fontes independentes).
+### Benchmarks that support the choice (OCR/vision)
+- **Qwen3-VL-8B**: DocVQA 96.1%, OCRBench 89.6% (two independent sources).
 - **Qwen3-VL-4B**: OCRBench ~87.3%, DocVQA ~94.9%.
-- **Extração de campos de recibos**: forte em números/datas/totais
-  (Total ~0.81–0.84, Tax ~0.77–0.80, Time ~0.91), MAS fraco em texto livre
-  (Nome da loja ~0.14–0.16, ID do recibo ~0.11–0.13).
-  → **Confiar em valores numéricos/datas/totais; tratar nomes e IDs como baixa
-  confiança e pedir confirmação ao utilizador.**
-- Qwen3-VL bate claramente o Gemma 3 em recibos.
+- **Receipt field extraction**: strong on numbers/dates/totals
+  (Total ~0.81–0.84, Tax ~0.77–0.80, Time ~0.91), BUT weak on free text
+  (Store name ~0.14–0.16, Receipt ID ~0.11–0.13).
+  → **Trust numeric values/dates/totals; treat names and IDs as low confidence and
+  ask the user to confirm.**
+- Qwen3-VL clearly beats Gemma 3 on receipts.
 
-### Multilingue EN/PT
-- Gemma 4 tem afinação mais forte em línguas europeias (incl. PT); comunidade
-  considerou-o superior ao Qwen 3.5 em tarefas não-inglesas.
-- Qwen3 também é fortemente multilingue (119–201 línguas).
-- **Decisão:** Qwen3-VL como default (unifica chat+OCR); Gemma 4 como modelo de
-  chat comutável se a qualidade de PT em conversa pura não satisfizer.
+### Multilingual EN/PT
+- Gemma 4 has stronger tuning for European languages (incl. PT); the community
+  considered it superior to Qwen 3.5 on non-English tasks.
+- Qwen3 is also strongly multilingual (119–201 languages).
+- **Decision:** Qwen3-VL as default (unifies chat+OCR); Gemma 4 as a switchable chat
+  model if PT quality in pure conversation is not satisfactory.
 
-### Esclarecimento de nomes de modelos (os nomes testados eram imprecisos)
-- "gemma4" → Gemma 4 (abril 2026): E2B/E4B/12B/26B-A4B/31B, multimodal.
-- "qwen3.6" → Qwen3.6-35B-A3B (MoE, ~21GB) ou 27B denso (~16.8GB) — DEMASIADO
-  grandes para o 3060; reservar só para o Mac, se acaso.
-- "qwen3.5 9b" → Qwen3.5-9B (real). CAVEAT: GGUFs de visão do Qwen3.5 ainda não
-  correm bem em Ollama (ficheiros mmproj separados) — usar Qwen3-VL para visão.
-- "qwen2.5-coder" (3/7/14B) → real, mas não central para este projeto.
+### Model-name clarification (the tested names were imprecise)
+- "gemma4" → Gemma 4 (April 2026): E2B/E4B/12B/26B-A4B/31B, multimodal.
+- "qwen3.6" → Qwen3.6-35B-A3B (MoE, ~21GB) or 27B dense (~16.8GB) — TOO large for the
+  3060; reserve only for the Mac, if ever.
+- "qwen3.5 9b" → Qwen3.5-9B (real). CAVEAT: Qwen3.5 vision GGUFs still don't run well
+  in Ollama (separate mmproj files) — use Qwen3-VL for vision.
+- "qwen2.5-coder" (3/7/14B) → real, but not central to this project.
 
 ---
 
-## 4. Stack técnico
+## 4. Technical stack
 
 ```
 ┌──────────────────────────────────────────────┐
 │  Frontend: SvelteKit (Svelte 5 + Runes)        │
-│  Stage 1: SÓ a vista de Chat                   │
-│  Minimalista, dark, tipografia contida (Jony   │
+│  Stage 1: ONLY the Chat view                   │
+│  Minimalist, dark, restrained typography (Jony │
 │  Ive-style), PWA                               │
 └──────────────┬─────────────────────────────────┘
                │ HTTP/SSE (localhost)
 ┌──────────────▼─────────────────────────────────┐
-│  Backend: Python / FastAPI (processo único)     │
-│  • Orquestração de chat + montagem de prompt    │
-│  • Serviço de memória (extract/retrieve/consol.)│
-│  • Visão/OCR + estruturação (JSON-schema)       │
-│  • Dispatcher de webhook (Stage 3)              │
+│  Backend: Python / FastAPI (single process)     │
+│  • Chat orchestration + prompt assembly         │
+│  • Memory service (extract/retrieve/consol.)    │
+│  • Vision/OCR + structuring (JSON-schema)       │
+│  • Webhook dispatcher (Stage 3)                 │
 └───┬───────────────┬──────────────┬──────────────┘
     │               │              │
 ┌───▼────┐   ┌───────▼──────┐  ┌────▼─────────────┐
 │ Ollama │   │ SQLite +     │  │ EmbeddingGemma   │
 │qwen3-vl│   │ sqlite-vec + │  │ (via Ollama, CPU,│
-│(+gemma)│   │ FTS5 (1 fich)│  │  ZERO VRAM)      │
+│(+gemma)│   │ FTS5 (1 file)│  │  ZERO VRAM)      │
 └────────┘   └──────────────┘  └──────────────────┘
 ```
 
-### Porquê estas escolhas
-- **FastAPI (não Node):** ecossistema local-AI/RAG mais maduro em Python
-  (cliente Ollama, structured outputs Pydantic, memória estilo Mem0, bindings
-  sqlite-vec). Async + validação de schema com mínimo código.
-- **SvelteKit:** compilador, bundles mínimos, sem virtual-DOM. Ideal para app
-  local-first minimalista de utilizador único. (A nova App Store web da Apple
-  é feita em Svelte — validação para UI de gama alta.)
-- **sqlite-vec (não Chroma/Qdrant/pgvector):** um único ficheiro, in-process,
-  zero servidor, idêntico em macOS/Windows. Co-localiza memória semântica +
-  histórico de conversa + estado da app no mesmo ficheiro SQLite. Backup = copiar
-  um ficheiro. Alternativa de futuro: LanceDB se os dados crescerem muito (>1M vetores).
-- **EmbeddingGemma-300M:** melhor modelo de embedding multilingue <500M no MTEB
-  à data; corre em <200MB RAM em CPU. Disponível em Ollama. Alternativas:
+### Why these choices
+- **FastAPI (not Node):** a more mature local-AI/RAG ecosystem in Python
+  (Ollama client, Pydantic structured outputs, Mem0-style memory, sqlite-vec
+  bindings). Async + schema validation with minimal code.
+- **SvelteKit:** a compiler, minimal bundles, no virtual DOM. Ideal for a
+  minimalist single-user local-first app. (Apple's new web App Store is built in
+  Svelte — validation for high-end UI.)
+- **sqlite-vec (not Chroma/Qdrant/pgvector):** a single file, in-process, zero
+  server, identical on macOS/Windows. Co-locates semantic memory + conversation
+  history + app state in the same SQLite file. Backup = copy one file. Future
+  alternative: LanceDB if the data grows a lot (>1M vectors).
+- **EmbeddingGemma-300M:** the best multilingual embedding model <500M on MTEB at the
+  time; runs in <200MB RAM on CPU. Available in Ollama. Alternatives:
   nomic-embed-text-v2, BGE-M3.
 
 ---
 
-## 5. Arquitetura de memória (dois níveis, um único ficheiro SQLite)
+## 5. Memory architecture (two levels, a single SQLite file)
 
-Padrão **estilo Mem0 (extract → consolidate)**. (Paper Mem0, arXiv:2504.19413:
-+26% em LLM-as-Judge vs OpenAI, -91% latência p95, -90% tokens vs meter histórico
-completo no contexto — i.e. mais preciso E mais barato.)
+**Mem0-style pattern (extract → consolidate).** (Mem0 paper, arXiv:2504.19413:
++26% on LLM-as-Judge vs OpenAI, -91% p95 latency, -90% tokens vs putting the full
+history in context — i.e. more accurate AND cheaper.)
 
-### Camada A — Memória semântica (factos/preferências sobre o utilizador)
-Após cada troca, uma chamada de extração (LLM local com JSON-schema) extrai factos
-duráveis ("prefere despesas categorizadas por comerciante", "salário pago no dia
-25", "fala português em casa"). Cada facto é embebido com EmbeddingGemma e guardado
-em sqlite-vec com metadados (tipo, timestamp, fonte). Na escrita, comparar com os
-top-k factos semelhantes existentes e decidir **ADD / UPDATE / DELETE / NOOP** para
-evitar duplicados e resolver contradições.
+### Layer A — Semantic memory (facts/preferences about the user)
+After each exchange, an extraction call (local LLM with JSON-schema) extracts durable
+facts ("prefers expenses categorized by merchant", "salary paid on the 25th", "speaks
+Portuguese at home"). Each fact is embedded with EmbeddingGemma and stored in
+sqlite-vec with metadata (type, timestamp, source). On write, compare against the
+top-k similar existing facts and decide **ADD / UPDATE / DELETE / NOOP** to avoid
+duplicates and resolve contradictions.
 
-### Camada B — Histórico de conversa pesquisável
-Guardar cada mensagem literal numa tabela SQLite normal (pesquisável por FTS5), E
-também embeber cada turno em sqlite-vec para recuperação semântica. Dá pesquisa por
-palavra-chave E pesquisa semântica ("o que falámos sobre a minha renda?").
+### Layer B — Searchable conversation history
+Store each literal message in a normal SQLite table (searchable via FTS5), AND also
+embed each turn in sqlite-vec for semantic retrieval. This gives keyword search AND
+semantic search ("what did we talk about regarding my rent?").
 
-### Injeção na recuperação
-A cada novo turno: (1) embeber a query, (2) recuperar top-k factos semânticos +
-top-k turnos passados relevantes do sqlite-vec, (3) opcionalmente reordenar,
-(4) injetar num bloco compacto no system prompt ("O que sei sobre ti" + "Contexto
-relevante passado"), (5) chamar o Qwen3-VL. Toda a recuperação é CPU/SQLite —
-**ZERO VRAM.**
+### Injection at retrieval
+On each new turn: (1) embed the query, (2) retrieve top-k semantic facts + top-k
+relevant past turns from sqlite-vec, (3) optionally rerank, (4) inject into a compact
+block in the system prompt ("What I know about you" + "Relevant past context"),
+(5) call Qwen3-VL. All retrieval is CPU/SQLite — **ZERO VRAM.**
 
-> A lógica de **consolidação** (Camada A) é a parte com mais subtileza do projeto.
-> É o que decide se o assistente parece inteligente ou se acumula lixo duplicado.
-> Vale a pena estabilizá-la e testá-la isoladamente.
-
----
-
-## 6. Visão (Stage 2 — IMPLEMENTADO como visão de uso GERAL)
-
-> ATUALIZAÇÃO (estado real): o Stage 2 foi construído como **chat multimodal de
-> uso geral**, não como extração estruturada de recibos. Descobriu-se que o
-> `qwen3-vl` lê imagens com excelência em formato livre (OCR/descrição), mas o
-> *structured output* rígido (schema de recibo via `format=`) colapsava os campos
-> para `null`. Decisão: a imagem entra no `/chat` (campo `image_base64`), é
-> descodificada, redimensionada (lado maior <= `vision_max_dim`, JPEG q88 via
-> Pillow) e anexada ao turno do utilizador para o `qwen3-vl` ver; a resposta vem
-> em streaming normal. A imagem é persistida em `data/images/<uuid>.jpg` e o
-> caminho guardado em `messages.image_path` (visível ao recarregar a conversa).
-> A **estruturação JSON de transações** (recibos -> `{date, amount, ...}`) regressa
-> como ação EXPLÍCITA no Stage 3, não como modo silencioso do chat.
-
-### Notas técnicas do pipeline de visão (mantidas, ainda válidas)
-
-1. **Um modelo, sem troca.** Qwen3-VL faz chat e OCR/visão. Já carregado → sem
-   penalização de troca.
-2. **Imagens via API do Ollama** (`images: [base64]`). `temperature: 0` +
-   **structured outputs** (`format` = JSON schema) → JSON validado, não prosa.
-3. **Contrato anti-alucinação (prompt):** transcrever exatamente; devolver `null`
-   para campos ausentes; anexar confiança por campo. Confiar em
-   números/datas/totais; sinalizar nomes/IDs para confirmação.
-4. **Contexto modesto:** encoder de visão soma 1–3GB sobre o modelo de texto;
-   imagens grandes consomem tokens. No 3060, reduzir imagens muito grandes.
-   Definir `num_ctx` explicitamente (default silencioso do Ollama é pequeno).
-5. **Fallback híbrido opcional** (só se a precisão falhar em documentos densos):
-   rotear páginas de baixa confiança para Tesseract. Para recibos/extratos num
-   contexto de finanças pessoais, Qwen3-VL sozinho é o default recomendado.
-
-**Validar em PT:** não existe número público de precisão de OCR específico para
-português nestes modelos pequenos. É preciso **validar empiricamente** com
-recibos/extratos reais teus (PT e EN) no Stage 2.
+> The **consolidation** logic (Layer A) is the subtlest part of the project. It is
+> what decides whether the assistant seems smart or accumulates duplicated junk. It
+> is worth stabilizing and testing in isolation.
 
 ---
 
-## 7. Pipeline de estruturação/automação (Stage 3)
+## 6. Vision (Stage 2 — IMPLEMENTED as GENERAL-purpose vision)
 
-1. **Input:** texto de chat, texto colado, ou imagem.
-2. **Estruturar:** Qwen3-VL com **JSON-schema structured output** (via `format`
-   do Ollama, ou Pydantic `model_json_schema()`) descrevendo a forma da transação
-   de destino: `{date, amount, currency, merchant, category, account, notes,
-   confidence}`. Para imagens, isto faz OCR + extração numa só chamada.
-3. **Validar:** parse com Pydantic; regras de negócio (moeda, sinal, normalização
-   de datas); rotear campos de baixa confiança para uma UI de confirmação rápida.
-4. **Despachar:** POST do JSON validado para a API/webhook do software de destino
-   (endpoint + auth configuráveis). Como o destino ainda não existe, definir já um
-   schema interno estável e adicionar um adapter fino depois (estilo whisper-money).
-5. **Registar + aprender:** escrever o registo estruturado e as correções do
-   utilizador de volta na memória para melhorar a categorização ao longo do tempo.
+> UPDATE (real state): Stage 2 was built as **general-purpose multimodal chat**, not
+> structured receipt extraction. It turned out that `qwen3-vl` reads images
+> excellently in free form (OCR/description), but rigid *structured output* (a receipt
+> schema via `format=`) collapsed the fields to `null`. Decision: the image enters
+> `/chat` (the `image_base64` field), is decoded, resized (longer side <=
+> `vision_max_dim`, JPEG q88 via Pillow) and attached to the user's turn for
+> `qwen3-vl` to see; the response streams normally. The image is persisted in
+> `data/images/<uuid>.jpg` and the path saved in `messages.image_path` (visible when
+> reloading the conversation). The **JSON structuring of transactions** (receipts ->
+> `{date, amount, ...}`) returns as an EXPLICIT action in Stage 3, not as a silent
+> chat mode.
+
+### Technical notes on the vision pipeline (kept, still valid)
+
+1. **One model, no switching.** Qwen3-VL does chat and OCR/vision. Already loaded → no
+   switching penalty.
+2. **Images via the Ollama API** (`images: [base64]`). `temperature: 0` +
+   **structured outputs** (`format` = JSON schema) → validated JSON, not prose.
+3. **Anti-hallucination contract (prompt):** transcribe exactly; return `null` for
+   missing fields; attach per-field confidence. Trust numbers/dates/totals; flag
+   names/IDs for confirmation.
+4. **Modest context:** the vision encoder adds 1–3GB over the text model; large
+   images consume tokens. On the 3060, shrink very large images. Set `num_ctx`
+   explicitly (Ollama's silent default is small).
+5. **Optional hybrid fallback** (only if accuracy fails on dense documents): route
+   low-confidence pages to Tesseract. For receipts/statements in a personal-finance
+   context, Qwen3-VL alone is the recommended default.
+
+**Validate in PT:** there is no public OCR-accuracy figure specific to Portuguese for
+these small models. It must be **validated empirically** with your real receipts/
+statements (PT and EN) in Stage 2.
 
 ---
 
-## 8. Estrutura de ficheiros
+## 7. Structuring/automation pipeline (Stage 3)
+
+1. **Input:** chat text, pasted text, or an image.
+2. **Structure:** Qwen3-VL with **JSON-schema structured output** (via Ollama's
+   `format`, or Pydantic `model_json_schema()`) describing the shape of the target
+   transaction: `{date, amount, currency, merchant, category, account, notes,
+   confidence}`. For images, this does OCR + extraction in a single call.
+3. **Validate:** parse with Pydantic; business rules (currency, sign, date
+   normalization); route low-confidence fields to a quick confirmation UI.
+4. **Dispatch:** POST the validated JSON to the target software's API/webhook
+   (configurable endpoint + auth). Since the target does not exist yet, define a
+   stable internal schema now and add a thin adapter later.
+5. **Log + learn:** write the structured record and the user's corrections back into
+   memory to improve categorization over time.
+
+---
+
+## 8. File structure
 
 ```
-projeto/
-├── CLAUDE.md              # este ficheiro
+project/
+├── CLAUDE.md              # this file
 ├── backend/
 │   ├── main.py            # FastAPI: /chat (SSE, multimodal), /conversations,
 │   │                      #   /memory/facts, /images (StaticFiles)
-│   ├── ollama_client.py   # chamadas ao Ollama (chat stream + embeddings)
-│   ├── memory.py          # extract -> consolidate -> retrieve; search/edit (painel)
-│   ├── db.py              # SQLite + sqlite-vec + FTS5 (1 ficheiro) + migrações
-│   ├── config.py          # Settings (modelos, paths, images_dir, vision_max_dim)
-│   └── schemas.py         # Pydantic (ChatRequest com image_base64)
-├── frontend/              # SvelteKit (Svelte 5), tema One Dark + Fira Code
+│   ├── ollama_client.py   # Ollama calls (chat stream + embeddings)
+│   ├── memory.py          # extract -> consolidate -> retrieve; search/edit (panel)
+│   ├── db.py              # SQLite + sqlite-vec + FTS5 (1 file) + migrations
+│   ├── config.py          # Settings (models, paths, images_dir, vision_max_dim)
+│   └── schemas.py         # Pydantic (ChatRequest with image_base64)
+├── frontend/              # SvelteKit (Svelte 5), One Dark theme + Fira Code
 │   └── src/
-│       ├── routes/+page.svelte      # shell: Sidebar + chat + painéis
-│       ├── lib/chat.ts              # streaming SSE (normaliza CRLF do sse-starlette)
-│       ├── lib/api.ts               # helpers de conversas + memória + imagens
+│       ├── routes/+page.svelte      # shell: Sidebar + chat + panels
+│       ├── lib/chat.ts              # SSE streaming (normalizes sse-starlette CRLF)
+│       ├── lib/api.ts               # conversation + memory + image helpers
 │       └── lib/components/
-│           ├── Sidebar.svelte       # lista de conversas (rename/apagar)
-│           └── MemoryPanel.svelte   # ver/pesquisar/editar/apagar factos
+│           ├── Sidebar.svelte       # conversation list (rename/delete)
+│           └── MemoryPanel.svelte   # view/search/edit/delete facts
 └── data/
-    ├── memory.db          # ficheiro único de memória
-    └── images/            # imagens anexadas persistidas (<uuid>.jpg)
+    ├── memory.db          # single memory file
+    └── images/            # persisted attached images (<uuid>.jpg)
 ```
 
-### Camada de gestão (estilo Odysseus, mas minimalista) — IMPLEMENTADA
-- **Chats**: sidebar com lista de conversas (título auto-gerado da 1ª mensagem),
-  carregar histórico, renomear (`PATCH /conversations/{id}`), apagar (`DELETE`,
-  limpeza ordenada sem `ON DELETE CASCADE`).
-- **Memória**: painel (ícone na sidebar) para ver/pesquisar (`GET
-  /memory/facts?q=`, ordenação semântica), editar (`PATCH`, re-embebe mantendo o
-  lockstep) e apagar factos.
-- **Imagens**: persistidas por conversa (ver secção 6) + **galeria** (`GET
-  /gallery`, painel com grelha + lightbox, abre a conversa de origem).
-- **Skills** (instruções leves): tabela `skills`, CRUD em `/skills`, com toggle
-  enabled. As skills ativas são injetadas no system prompt de cada chat
-  (`SkillsPanel.svelte`). NÃO são auto-aprendidas (decisão: versão leve).
-- **Pipeline (Stage 3)**: vista dedicada (`PipelinePanel.svelte`). Cola texto ou
-  anexa imagem -> `POST /pipeline/extract`: se imagem, transcreve primeiro
-  (`vision_describe`) e depois faz extração texto->JSON (mais fiável que JSON
-  direto sobre imagem) para `TransactionExtraction` {date, amount, currency,
-  merchant, category, account, notes, confidence, low_confidence_fields}. UI de
-  confirmação realça campos de baixa confiança. `POST /pipeline/dispatch` regista
-  em `transactions` e, se `dispatch_url` estiver configurado, faz POST ao webhook.
-- **UI**: paleta One Dark e fonte Fira Code self-hosted, espelhando o Odysseus
-  (`pewdiepie-archdaemon/odysseus`), mas reduzido só ao essencial. Ícones na
-  sidebar: ◈ Memória, ✦ Skills, ▦ Galeria, ⇄ Pipeline.
+### Management layer (Odysseus-style, but minimalist) — IMPLEMENTED
+- **Chats**: sidebar with a conversation list (auto-generated title from the 1st
+  message), load history, rename (`PATCH /conversations/{id}`), delete (`DELETE`,
+  ordered cleanup without `ON DELETE CASCADE`).
+- **Memory**: panel (sidebar icon) to view/search (`GET /memory/facts?q=`, semantic
+  ordering), edit (`PATCH`, re-embeds keeping lockstep) and delete facts.
+- **Images**: persisted per conversation (see section 6) + **gallery** (`GET
+  /gallery`, panel with grid + lightbox, opens the source conversation).
+- **Skills** (lightweight instructions): `skills` table, CRUD at `/skills`, with an
+  enabled toggle. Active skills are injected into each chat's system prompt
+  (`SkillsPanel.svelte`). They are NOT auto-learned (decision: lightweight version).
+- **Pipeline (Stage 3)**: dedicated view (`PipelinePanel.svelte`). Paste text or
+  attach an image -> `POST /pipeline/extract`: if an image, transcribe first
+  (`vision_describe`) and then do text->JSON extraction (more reliable than direct
+  JSON over an image) into `TransactionExtraction` {date, amount, currency, merchant,
+  category, account, notes, confidence, low_confidence_fields}. The confirmation UI
+  highlights low-confidence fields. `POST /pipeline/dispatch` logs to `transactions`
+  and, if `dispatch_url` is configured, POSTs to the webhook.
+- **UI**: One Dark palette and self-hosted Fira Code font, mirroring Odysseus
+  (`pewdiepie-archdaemon/odysseus`), but reduced to the essentials. Sidebar icons:
+  ◈ Memory, ✦ Skills, ▦ Gallery, ⇄ Pipeline.
 
 ---
 
-## 9. Plano de construção faseado
+## 9. Phased build plan
 
-> ESTADO ATUAL: Stage 1 (chat + memória), Stage 2 (visão geral) e Stage 3
-> (pipeline de estruturação + dispatch) CONCLUÍDOS. Camada de gestão completa:
-> Chats, Memória, Imagens+Galeria, Skills (leves), Pipeline (ver secção 8). Em
-> aberto/futuro: dispatch para um destino real (whisper-money), skills
-> auto-aprendidas, e validação empírica de OCR em PT com documentos reais.
+> CURRENT STATE: Stage 1 (chat + memory), Stage 2 (general vision) and Stage 3
+> (structuring pipeline + dispatch) DONE. Management layer complete: Chats, Memory,
+> Images+Gallery, Skills (lightweight), Pipeline (see section 8). Open/future:
+> dispatch to a real target (a personal-finance app), auto-learned skills, and
+> empirical OCR validation in PT with real documents.
 
-### STAGE 1 — Chat + memória (CONCLUÍDO)
-1. Backend FastAPI mínimo: endpoint `/chat` → Ollama em streaming SSE (sem memória,
-   só confirmar o tubo).
-2. Persistência crua: guardar cada mensagem em SQLite + FTS5.
-3. Camada semântica: extração com JSON-schema → embedding EmbeddingGemma →
-   sqlite-vec; consolidação ADD/UPDATE/DELETE/NOOP; recuperação top-k + injeção no
-   prompt.
-4. Frontend SvelteKit: vista de chat minimalista, dark.
-5. **Teste de validação:** dizer factos numa conversa, fechar, abrir conversa nova
-   → o assistente deve "lembrar-se". Este é o critério para avançar para o Stage 2.
+### STAGE 1 — Chat + memory (DONE)
+1. Minimal FastAPI backend: `/chat` endpoint → Ollama with SSE streaming (no memory,
+   just confirm the pipe).
+2. Raw persistence: store each message in SQLite + FTS5.
+3. Semantic layer: extraction with JSON-schema → EmbeddingGemma embedding →
+   sqlite-vec; ADD/UPDATE/DELETE/NOOP consolidation; top-k retrieval + injection into
+   the prompt.
+4. SvelteKit frontend: minimalist, dark chat view.
+5. **Validation test:** state facts in one conversation, close it, open a new one
+   → the assistant should "remember". This is the criterion for moving to Stage 2.
 
-### STAGE 2 — OCR/visão (NÃO construir até o Stage 1 estar validado)
-Upload de imagem → Qwen3-VL com `temperature:0` + JSON-schema + contrato
-anti-alucinação. Testar com recibos reais PT e EN.
-**Critério:** números/datas/totais fiáveis; campos de baixa confiança sinalizados.
+### STAGE 2 — OCR/vision (do not build until Stage 1 is validated)
+Image upload → Qwen3-VL with `temperature:0` + JSON-schema + anti-hallucination
+contract. Test with real PT and EN receipts.
+**Criterion:** numbers/dates/totals reliable; low-confidence fields flagged.
 
 ### STAGE 3 — Dispatch + polish
-Schema interno estável de transação; dispatcher de webhook (endpoint/auth
-configuráveis); vistas de Memória (browse/editar/apagar factos) e de Pipeline.
+Stable internal transaction schema; webhook dispatcher (configurable endpoint/auth);
+Memory (browse/edit/delete facts) and Pipeline views.
 
 ---
 
-## 10. Caveats e armadilhas conhecidas
+## 10. Caveats and known pitfalls
 
-- **OCR em português NÃO está validado:** sem números públicos para modelos
-  pequenos. Validar com documentos próprios no Stage 2.
-- **Quantização vs precisão:** Q4_K_M (default Ollama) custa ~3–5% em tarefas de
-  OCR. No Mac (24GB) preferir precisão mais alta para trabalho com documentos.
-- **Alucinação é o modo de falha dos VLMs:** inventam valores para campos vazios.
-  Mitigar com prompt estrito + temperature 0 + structured outputs.
-- **Qwen3.5 visão em Ollama:** ainda com fricção (mmproj separado). Usar Qwen3-VL
-  para visão.
-- **Tool-calling no Gemma 4** é mais fraco que Qwen/Llama; se adicionar tool use
-  mais tarde, preferir Qwen3-VL e manter Ollama atualizado.
-- **Odysseus é "vibecoded"** com possíveis falhas de segurança nos agentes — usar
-  só como inspiração de design/conceito, NÃO fazer fork do código. A reconstrução
-  minimalista evita toda a superfície de risco (agentes/shell/email).
-- **Versões mudam depressa:** reconfirmar tags em ollama.com/library antes de fixar
-  versões.
+- **OCR in Portuguese is NOT validated:** no public figures for small models.
+  Validate with your own documents in Stage 2.
+- **Quantization vs accuracy:** Q4_K_M (Ollama default) costs ~3–5% on OCR tasks. On
+  the Mac (24GB) prefer higher precision for document work.
+- **Hallucination is the VLM failure mode:** they invent values for empty fields.
+  Mitigate with a strict prompt + temperature 0 + structured outputs.
+- **Qwen3.5 vision in Ollama:** still has friction (separate mmproj). Use Qwen3-VL
+  for vision.
+- **Tool-calling in Gemma 4** is weaker than Qwen/Llama; if adding tool use later,
+  prefer Qwen3-VL and keep Ollama up to date.
+- **Odysseus is "vibecoded"** with possible security flaws in the agents — use it only
+  as design/concept inspiration, do NOT fork the code. The minimalist rebuild avoids
+  the entire risk surface (agents/shell/email).
+- **Versions change fast:** reconfirm tags on ollama.com/library before pinning
+  versions.
 
 ---
 
-## 11. O que NÃO incluir (manter leve)
+## 11. Current scope and what stays out (for now)
 
-Sem agentes autónomos. Sem deep research. Sem email/calendário. Sem geração de
-imagens. Sem servidores de base de dados externos. Cada superfície a mais é VRAM,
-complexidade e risco que este hardware não suporta.
+The rule is not "never", it's "not while it costs more than this hardware can handle
+or breaks local-first". **Out of current scope**, re-evaluable case by case: heavy
+autonomous agents, deep research, email/calendar, image generation, external database
+servers. Each extra surface is VRAM, complexity and risk; it only comes in if there is
+a **lightweight, offline** way to do it that passes the local-first invariant filter
+(section 1). Design inspiration from larger projects (Odysseus, Hermes Agent) is
+welcome; the **weight** of those projects is not.

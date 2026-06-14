@@ -1,42 +1,39 @@
-# sv
+# Penelope: frontend
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit (Svelte 5 + runes) UI for Penelope, the local-first AI assistant.
+One Dark theme + Fira Code. Talks to the FastAPI backend over HTTP/SSE.
 
-## Creating a project
+For the full project overview and the one-command launcher, see the
+[root README](../README.md).
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Develop
 
-```sh
-# create a new project
-npx sv create my-app
+```bash
+npm install
+npm run dev          # Vite dev server on :5173, proxies /api -> backend :8000
 ```
 
-To recreate this project with the same configuration:
+The backend must be running on `127.0.0.1:8000` (see [`../backend`](../backend)).
+Open http://localhost:5173.
 
-```sh
-# recreate this project
-npx sv@0.15.4 create --template minimal --types ts --install npm frontend
+## Useful scripts
+
+```bash
+npm run check        # svelte-check (types + Svelte diagnostics)
+npm run build        # production build
+npm run preview      # preview the production build
 ```
 
-## Developing
+## Layout
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
 ```
-
-## Building
-
-To create a production version of your app:
-
-```sh
-npm run build
+src/
+├── routes/+page.svelte      # app shell (icon rail + active view)
+├── lib/
+│   ├── api.ts               # backend helpers (conversations, memory, images…)
+│   ├── chat.ts              # SSE streaming (normalizes sse-starlette CRLF)
+│   ├── stream-buffer.ts     # smooth token rendering
+│   ├── components/          # Spinner, ActivityLane, ThinkingPanel, Markdown…
+│   └── views/               # Chat, Compare, Notes, Tasks, Settings, Agents…
+└── app.html                 # document shell
 ```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.

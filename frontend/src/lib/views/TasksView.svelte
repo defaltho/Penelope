@@ -92,7 +92,7 @@
 	.view {
 		flex: 1;
 		min-width: 0;
-		height: 100dvh;
+		min-height: 0;
 		overflow-y: auto;
 	}
 	.inner {

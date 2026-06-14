@@ -1,8 +1,14 @@
-# Dados locais (memória persistente) - nunca versionar
+# Local data (persistent memory) - never version
 data/
 *.db
 *.db-wal
 *.db-shm
+
+# Internal notes / planning (personal)
+docs/
+
+# Local config (per-machine; never version)
+backend/.env
 
 # Python / uv
 backend/.venv/

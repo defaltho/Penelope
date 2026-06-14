@@ -1,6 +1,8 @@
 /* Penelope — linguagem visual alinhada com o Odysseus (paleta One Dark,
    Fira Code monospace), mas reduzida ao mínimo: só o chat. */
 
+@import url('https://fonts.googleapis.com/css2?family=Rubik:ital,wght@0,300..900;1,300..900&display=swap');
+
 @font-face {
 	font-family: 'Fira Code';
 	font-weight: 300;
@@ -23,26 +25,20 @@
 	src: url('/fonts/FiraCode-SemiBold.woff2') format('woff2');
 }
 @font-face {
-	font-family: 'Inter';
-	font-weight: 400;
+	font-family: 'Lora';
+	font-weight: 400 700;
 	font-style: normal;
 	font-display: swap;
-	src: url('/fonts/Inter-Regular.woff2') format('woff2');
+	src: url('/fonts/Lora-Variable.woff2') format('woff2');
 }
 @font-face {
-	font-family: 'Inter';
-	font-weight: 500;
-	font-style: normal;
+	font-family: 'Lora';
+	font-weight: 400 700;
+	font-style: italic;
 	font-display: swap;
-	src: url('/fonts/Inter-Medium.woff2') format('woff2');
+	src: url('/fonts/Lora-Italic-Variable.woff2') format('woff2');
 }
-@font-face {
-	font-family: 'Inter';
-	font-weight: 600;
-	font-style: normal;
-	font-display: swap;
-	src: url('/fonts/Inter-SemiBold.woff2') format('woff2');
-}
+/* Rubik carregado via Google Fonts CDN (@import no topo) */
 
 :root {
 	/* Paleta base (sobrescrita por theme.ts/applyTheme; default = dark quase-preto). */
@@ -71,8 +67,9 @@
 	--glow-accent: 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
 	--ring-focus: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 
-	--font-ui: 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
-	--font-body: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+	--font-ui: 'Rubik', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+	--font-body: 'Lora', Georgia, 'Times New Roman', serif;
+	--font-mono: 'Fira Code', ui-monospace, 'SF Mono', Menlo, monospace;
 
 	color-scheme: dark;
 }
@@ -150,10 +147,36 @@ body {
 	}
 }
 
+/* Caret a piscar no fim do texto em streaming (B1: fluidez). */
+.caret {
+	display: inline-block;
+	width: 0.55em;
+	height: 1em;
+	margin-left: 1px;
+	vertical-align: text-bottom;
+	background: var(--accent);
+	border-radius: 1px;
+	animation: pen-caret 1s steps(1) infinite;
+}
+@keyframes pen-caret {
+	0%,
+	50% {
+		opacity: 1;
+	}
+	50.01%,
+	100% {
+		opacity: 0;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.overlay,
 	.panel {
 		animation: none;
+	}
+	.caret {
+		animation: none;
+		opacity: 0.7;
 	}
 }
 
