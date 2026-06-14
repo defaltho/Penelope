@@ -45,17 +45,13 @@ strengths.
 4. **Keep it to three roles.** New surfaces pick one of the existing variables; do
    not introduce a fourth family without a reason that survives the minimalist filter.
 
-## Open item: Cuprum
+## Cuprum (removed)
 
-`static/fonts/Cuprum-*.woff2` are present but **not wired** into any rule. Cuprum is
-a *condensed display* sans — good for a wordmark or large headings, not for dense UI
-text. Two clean options, your call:
-
-- **Drop it** (remove the two woff2) to keep the font set minimal. *(Recommended,
-  matches the minimalist philosophy.)*
-- **Keep it as a display face** for the app wordmark / large titles only, via a new
-  `--font-display: 'Cuprum', ...` used sparingly. Do **not** make it the UI body
-  font.
+Cuprum (`static/fonts/Cuprum-*.woff2`) was a *condensed display* sans that was never
+wired into any rule. To keep the font set minimal (the project philosophy), it was
+**removed**. If a distinct display face for the wordmark / large titles is ever
+wanted, re-add it as a separate `--font-display` token used sparingly — never as the
+UI body font.
 
 ## Files
 
