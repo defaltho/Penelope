@@ -220,6 +220,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
     "lang.en": {"en": "English", "pt": "Inglês"},
     "lang.pt": {"en": "Portuguese", "pt": "Português"},
 
+    # — agent approval —
+    "approval.header": {"en": "Agent wants to execute", "pt": "Agent quer executar"},
+    "approval.prompt": {"en": "Decision", "pt": "Decisão"},
+    "approval.hint": {"en": "(enter=deny)", "pt": "(enter=negar)"},
+    "approval.allow_once": {"en": "Once", "pt": "Uma vez"},
+    "approval.allow_session": {"en": "Session", "pt": "Sessão"},
+    "approval.allow_always": {"en": "Always", "pt": "Sempre"},
+    "approval.deny": {"en": "Deny", "pt": "Negar"},
+
     # — /web server flow —
     "web.uv_missing": {"en": "'uv' not found in PATH. Run 'bin\\setup.cmd' first.",
                        "pt": "'uv' não encontrado no PATH. Corre 'bin\\setup.cmd' primeiro."},

@@ -169,6 +169,24 @@ class PenelopeClient:
         except Exception:
             return {}
 
+    # -- Notes --
+
+    def create_note(self, title: str, content: str = "") -> dict:
+        try:
+            resp = self._post("/api/notes", json={"title": title, "content": content})
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
+    def delete_note(self, note_id: str) -> dict:
+        try:
+            resp = self.client.delete(f"/api/notes/{note_id}")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
     # -- Skills --
 
     def list_skills(self) -> list[dict]:

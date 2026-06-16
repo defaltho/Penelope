@@ -1,8 +1,9 @@
 """Inline agent approval prompt for the Penelope CLI."""
 from __future__ import annotations
 
+from cli.i18n import t
 from cli.render import get_console
-from cli.theme import ACCENT, ERROR, MUTED, SUCCESS, FG
+from cli.theme import ACCENT, ERROR, MUTED, SUCCESS
 
 
 _CHOICES = {
@@ -10,13 +11,6 @@ _CHOICES = {
     "2": "allow_session",
     "3": "allow_always",
     "4": "deny",
-}
-
-_LABELS = {
-    "allow_once": "Uma vez",
-    "allow_session": "Esta sessão",
-    "allow_always": "Sempre",
-    "deny": "Negar",
 }
 
 
@@ -28,18 +22,18 @@ def prompt_approval(tool: str, command: str) -> str:
     """
     console = get_console()
     console.print()
-    console.print(f"  [{ERROR} bold]⚠  Agent quer executar:[/{ERROR} bold] [{ACCENT}]{tool}[/{ACCENT}]")
+    console.print(f"  [{ERROR} bold]⚠  {t('approval.header')}:[/{ERROR} bold] [{ACCENT}]{tool}[/{ACCENT}]")
     if command:
         preview = command[:120] + ("…" if len(command) > 120 else "")
         console.print(f"    [{MUTED}]→ {preview}[/{MUTED}]")
     console.print()
     console.print(
-        f"  [{MUTED}]Decisão:[/{MUTED}] "
-        f"[[{SUCCESS}]1[/{SUCCESS}]] Uma vez  "
-        f"[[{SUCCESS}]2[/{SUCCESS}]] Sessão  "
-        f"[[{SUCCESS}]3[/{SUCCESS}]] Sempre  "
-        f"[[{ERROR}]4[/{ERROR}]] Negar  "
-        f"[{MUTED}](enter=negar)[/{MUTED}]: ",
+        f"  [{MUTED}]{t('approval.prompt')}:[/{MUTED}] "
+        f"[[{SUCCESS}]1[/{SUCCESS}]] {t('approval.allow_once')}  "
+        f"[[{SUCCESS}]2[/{SUCCESS}]] {t('approval.allow_session')}  "
+        f"[[{SUCCESS}]3[/{SUCCESS}]] {t('approval.allow_always')}  "
+        f"[[{ERROR}]4[/{ERROR}]] {t('approval.deny')}  "
+        f"[{MUTED}]{t('approval.hint')}[/{MUTED}]: ",
         end="",
     )
     try:
@@ -47,7 +41,7 @@ def prompt_approval(tool: str, command: str) -> str:
     except (EOFError, KeyboardInterrupt):
         raw = ""
     decision = _CHOICES.get(raw, "deny")
-    label = _LABELS[decision]
+    label = t(f"approval.{decision}")
     color = SUCCESS if decision != "deny" else ERROR
     console.print(f"  [{color}]→ {label}[/{color}]")
     console.print()

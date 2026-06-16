@@ -7,6 +7,7 @@ import click
 
 from cli.client import PenelopeClient
 from cli.render import print_error, print_markdown, print_token
+from cli.session_store import load_last_session, save_last_session
 
 
 @click.command()
@@ -15,11 +16,24 @@ from cli.render import print_error, print_markdown, print_token
 @click.option("--session", "-s", default=None, help="ID de sessão existente.")
 @click.option("--incognito", "-i", is_flag=True, help="Modo anónimo (nada é guardado).")
 @click.option("--markdown", "use_md", is_flag=True, help="Renderizar resposta como Markdown.")
-def chat(message: str, model: str | None, session: str | None, incognito: bool, use_md: bool) -> None:
+@click.option("--web", "use_web", is_flag=True, help="Activar pesquisa web.")
+@click.option("--no-think", "hide_think", is_flag=True, help="Suprimir bloco de raciocínio.")
+def chat(
+    message: str,
+    model: str | None,
+    session: str | None,
+    incognito: bool,
+    use_md: bool,
+    use_web: bool,
+    hide_think: bool,
+) -> None:
     """Envia uma mensagem e mostra a resposta em streaming."""
     client = PenelopeClient()
 
-    # Criar sessão se não fornecida
+    # Reutilizar última sessão se não fornecida explicitamente
+    if not session:
+        session = load_last_session()
+
     if not session:
         sess_data = client.create_session("Penelope CLI")
         session = sess_data.get("id") or sess_data.get("session_id")
@@ -28,15 +42,27 @@ def chat(message: str, model: str | None, session: str | None, incognito: bool, 
             sys.exit(1)
 
     full_response = ""
+    in_think = False
     try:
         for event, data in client.chat_stream(
             message,
             session_id=session,
             model=model,
             incognito=incognito,
+            use_web=use_web,
         ):
             if event == "token":
                 token = data.get("token", "")
+                if not token:
+                    continue
+                if hide_think:
+                    if "<think>" in token or "<THINK>" in token:
+                        in_think = True
+                    if "</think>" in token or "</THINK>" in token:
+                        in_think = False
+                        continue
+                    if in_think:
+                        continue
                 if use_md:
                     full_response += token
                 else:
@@ -54,11 +80,11 @@ def chat(message: str, model: str | None, session: str | None, incognito: bool, 
                 print_error(data.get("error", "erro desconhecido"))
                 sys.exit(1)
             elif event == "done":
-                if not use_md:
-                    print()
                 sid = data.get("session_id") or session
                 if sid:
-                    click.echo(f"\n[sessão {sid[:8]}]", err=True)
+                    save_last_session(str(sid))
+                    if not use_md:
+                        click.echo(f"\n[sessão {str(sid)[:8]}]", err=True)
     except Exception as e:
         print_error(str(e))
         sys.exit(1)

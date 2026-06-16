@@ -754,6 +754,11 @@ class PenelopeTUI:
                         activities.append(("memory", label, 0.0))
                         self._set_spinner(status_text("memory"))
 
+                elif event == "model_info":
+                    m = payload.get("model")
+                    if m:
+                        model_used = m
+
                 elif event == "error":
                     _flush_feed()
                     renderer.flush()
