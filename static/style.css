@@ -1338,9 +1338,17 @@ body.bg-pattern-sparkles {
     /* Disabled tool — dimmed to signal its feature is turned off globally */
     .list-item.tool-disabled {
       opacity: 0.4;
+      pointer-events: none;
+      cursor: not-allowed;
     }
     .list-item.tool-disabled:hover {
       opacity: 0.7;
+    }
+    /* Rail button placeholder — feature not yet available in Penelope */
+    .icon-rail-btn.nav-disabled {
+      opacity: 0.3;
+      pointer-events: none;
+      cursor: not-allowed;
     }
     /* Session bulk select mode */
     .session-bulk-bar {
