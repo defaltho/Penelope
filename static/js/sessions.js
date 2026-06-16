@@ -21,7 +21,7 @@ const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
 let _showAllSessions = false;
 let _expandedFolders = {};  // folderName -> true if "show more" clicked
-let _sortMode = Storage.get('odysseus-session-sort') || 'active'; // default to last active
+let _sortMode = Storage.get('penelope-session-sort') || 'active'; // default to last active
 let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -118,8 +118,8 @@ function _normalizeSessionsList(fetched) {
 export function initDependencies() {}
 
 // ── Folder state persistence ──
-const FOLDER_STATE_KEY = 'odysseus-folder-state';
-const FOLDER_ORDER_KEY = 'odysseus-folder-order';
+const FOLDER_STATE_KEY = 'penelope-folder-state';
+const FOLDER_ORDER_KEY = 'penelope-folder-order';
 
 function loadFolderState() {
   return Storage.getJSON(FOLDER_STATE_KEY, {});
@@ -1722,7 +1722,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     if (window.documentModule) {
       const docBtn = document.getElementById('overflow-doc-btn');
       const meta = sessions.find(s => s.id === id);
-      const shouldOpen = localStorage.getItem('odysseus-doc-open-' + id) === '1';
+      const shouldOpen = localStorage.getItem('penelope-doc-open-' + id) === '1';
       const hasDocs = !!(meta && meta.has_documents);
       if (docBtn) {
         docBtn.classList.remove('active');
@@ -3083,8 +3083,8 @@ export function closeArchive() {
 export function getSortMode() { return _sortMode; }
 export function setSortMode(mode) {
   _sortMode = mode || null;
-  if (mode) Storage.set('odysseus-session-sort', mode);
-  else Storage.remove('odysseus-session-sort');
+  if (mode) Storage.set('penelope-session-sort', mode);
+  else Storage.remove('penelope-session-sort');
   renderSessionList();
 }
 

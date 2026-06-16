@@ -1,6 +1,6 @@
 ---
 name: odysseus
-description: Use when the user asks Codex to read or write Odysseus data (todos, email, calendar, memory, documents) or to launch/monitor/stop a Cookbook model-serve task through the scoped Codex Agent API. Requires ODYSSEUS_URL and ODYSSEUS_API_TOKEN.
+description: Use when the user asks Codex to read or write Odysseus data (todos, email, calendar, memory, documents) or to launch/monitor/stop a Cookbook model-serve task through the scoped Codex Agent API. Requires PENELOPE_URL and PENELOPE_API_TOKEN.
 ---
 
 # Odysseus
@@ -11,8 +11,8 @@ Use this skill when a user asks to interact with Odysseus from Codex.
 
 Expect these environment variables:
 
-- `ODYSSEUS_URL`: Base URL for the user's Odysseus instance, for example `http://127.0.0.1:7000`.
-- `ODYSSEUS_API_TOKEN`: Scoped API token created in Odysseus Settings > Integrations > Add Integration > Codex Agent.
+- `PENELOPE_URL`: Base URL for the user's Odysseus instance, for example `http://127.0.0.1:7000`.
+- `PENELOPE_API_TOKEN`: Scoped API token created in Odysseus Settings > Integrations > Add Integration > Codex Agent.
 
 If either value is missing, do not guess credentials. Tell the user to create a Codex Agent token in Odysseus Settings and expose both values to the terminal session.
 
@@ -45,9 +45,9 @@ The Codex API supports todos/checklists:
 Use the bundled helper script when available:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py capabilities
-python3 integrations/codex/scripts/odysseus_api.py todos list
-python3 integrations/codex/scripts/odysseus_api.py todos add "Follow up"
+python3 integrations/codex/scripts/penelope_api.py capabilities
+python3 integrations/codex/scripts/penelope_api.py todos list
+python3 integrations/codex/scripts/penelope_api.py todos add "Follow up"
 ```
 
 Supported todo actions are `list`, `add`, `update`, `delete`, and `toggle_item`.
@@ -55,7 +55,7 @@ Supported todo actions are `list`, `add`, `update`, `delete`, and `toggle_item`.
 **Reminders (todos with a due date)** — the backend parses natural language. Send `due_date` in the body via the generic POST so the time becomes a structured reminder, NOT a literal substring inside the title. The `todos add TITLE` shortcut only sets the title, so use the POST form for anything with a time:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/todos '{"action":"add","title":"Call dentist","due_date":"tomorrow at 5pm"}'
+python3 integrations/codex/scripts/penelope_api.py POST /api/codex/todos '{"action":"add","title":"Call dentist","due_date":"tomorrow at 5pm"}'
 ```
 
 The backend accepts both ISO timestamps and natural language like `"tomorrow 5pm"`, `"next Monday 9am"`, `"in 2 hours"`. It anchors to the user's timezone.
@@ -70,8 +70,8 @@ The Codex API supports scoped email reads:
 Use the bundled helper script when available:
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py emails list 5
-python3 integrations/codex/scripts/odysseus_api.py emails read UID
+python3 integrations/codex/scripts/penelope_api.py emails list 5
+python3 integrations/codex/scripts/penelope_api.py emails read UID
 ```
 
 If `/api/codex/capabilities` does not show `email.read: true`, do not inspect email. Ask the user to enable Email read in the Codex Agent settings.
@@ -83,8 +83,8 @@ If `/api/codex/capabilities` does not show `email.read: true`, do not inspect em
 - `DELETE /api/codex/memory/{memory_id}` — remove a memory entry. Requires `memory:write`.
 
 ```bash
-python3 integrations/codex/scripts/odysseus_api.py GET /api/codex/memory
-python3 integrations/codex/scripts/odysseus_api.py POST /api/codex/memory '{"text":"User prefers SI units","category":"preference"}'
+python3 integrations/codex/scripts/penelope_api.py GET /api/codex/memory
+python3 integrations/codex/scripts/penelope_api.py POST /api/codex/memory '{"text":"User prefers SI units","category":"preference"}'
 ```
 
 ## Calendar
@@ -120,10 +120,10 @@ The Cookbook surface lets you reproduce what a human would do in Odysseus → Co
 - `POST /api/codex/cookbook/stop/{session_id}` — kill the tmux session. Requires `cookbook:launch`.
 
 ```bash
-python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook tasks
-python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook output serve-abc12345 400
-python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook stop serve-abc12345
-python3 ~/plugins/odysseus/scripts/odysseus_api.py cookbook serve \
+python3 ~/plugins/odysseus/scripts/penelope_api.py cookbook tasks
+python3 ~/plugins/odysseus/scripts/penelope_api.py cookbook output serve-abc12345 400
+python3 ~/plugins/odysseus/scripts/penelope_api.py cookbook stop serve-abc12345
+python3 ~/plugins/odysseus/scripts/penelope_api.py cookbook serve \
   /mnt/HADES/models/Qwen3.5-397B-A17B-AWQ \
   "vllm serve /mnt/HADES/models/Qwen3.5-397B-A17B-AWQ --host 0.0.0.0 --port 8001 --tensor-parallel-size 8 --max-model-len 262144 --gpu-memory-utilization 0.90 --dtype auto --max-num-seqs 8 --trust-remote-code --enable-expert-parallel --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3" \
   pewds@192.168.1.12

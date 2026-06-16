@@ -1,7 +1,7 @@
 {
-  "name": "Odysseus",
-  "short_name": "Odysseus",
-  "description": "Self-hosted AI chat with memory, documents, and tools",
+  "name": "Penelope",
+  "short_name": "Penelope",
+  "description": "Your private, local-first AI assistant with memory, documents, and tools",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

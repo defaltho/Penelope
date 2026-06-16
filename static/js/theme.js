@@ -32,8 +32,8 @@ export const THEMES = {
 };
 
 const DEFAULT_THEME = 'dark';
-const LS_KEY = 'odysseus-theme';
-const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
+const LS_KEY = 'penelope-theme';
+const CUSTOM_THEMES_KEY = 'penelope-custom-themes';
 
 const FONT_MAP = {
   mono: "'Fira Code', monospace",

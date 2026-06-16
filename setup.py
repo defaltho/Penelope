@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Odysseus — first-time setup script.
+"""Penelope — first-time setup script.
 
 Creates data directories, initializes the database, and sets up an
 initial admin user. Safe to re-run (skips what already exists).
@@ -89,8 +89,9 @@ def create_default_admin():
         import json
 
         # Priority: env vars > interactive prompt > random password
-        username = os.getenv("ODYSSEUS_ADMIN_USER", "").strip().lower()
-        password = os.getenv("ODYSSEUS_ADMIN_PASSWORD", "").strip()
+        # PENELOPE_ADMIN_* takes precedence; ODYSSEUS_ADMIN_* kept for compat
+        username = (os.getenv("PENELOPE_ADMIN_USER") or os.getenv("ODYSSEUS_ADMIN_USER", "")).strip().lower()
+        password = (os.getenv("PENELOPE_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD", "")).strip()
 
         if username and password:
             # Both provided via env — use them directly
@@ -116,13 +117,14 @@ def create_default_admin():
         with open(auth_path, "w", encoding="utf-8") as f:
             json.dump(auth_data, f, indent=2)
 
-        if sys.stdin.isatty() and not os.getenv("ODYSSEUS_ADMIN_PASSWORD"):
+        _admin_pw_env = os.getenv("PENELOPE_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")
+        if sys.stdin.isatty() and not _admin_pw_env:
             print(f"  [ok] Admin account created ({username})")
         else:
             print(f"  [ok] Initial admin user created ({username})")
-            if not os.getenv("ODYSSEUS_ADMIN_PASSWORD"):
+            if not _admin_pw_env:
                 print(f"        Temporary password: {password}")
-                print(f"        ** Change it after first login. Set ODYSSEUS_ADMIN_PASSWORD to choose your own. **")
+                print(f"        ** Change it after first login. Set PENELOPE_ADMIN_PASSWORD to choose your own. **")
         return "created"
     except ImportError as e:
         if "incompatible architecture" in str(e).lower():
