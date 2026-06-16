@@ -2665,45 +2665,70 @@ async def stream_agent_loop(
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
             else:
-                yield (
-                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "round": round_num})}\n\n'
+                # --- Penelope agent approval gate ---
+                _approval_denied = False
+                from src.agent_approval import (
+                    DANGEROUS_TOOLS as _DANGEROUS_TOOLS,
+                    is_allowed_for_session as _is_allowed,
+                    new_approval_id as _new_approval_id,
+                    wait_for_approval as _wait_for_approval,
                 )
-
-                # Streaming progress for long-running tools (bash, python).
-                # The bash/python branches inside _direct_fallback emit
-                # periodic {elapsed_s, tail} payloads via this callback;
-                # we forward each one as a `tool_progress` SSE event so
-                # the UI can render live elapsed-time + tail-of-output.
-                _progress_q: asyncio.Queue = asyncio.Queue()
-                async def _push_progress(payload):
-                    await _progress_q.put(payload)
-
-                async def _run_tool():
-                    try:
-                        return await execute_tool_block(
-                            block,
-                            session_id=session_id,
-                            disabled_tools=disabled_tools,
-                            tool_policy=tool_policy,
-                            owner=owner,
-                            progress_cb=_push_progress,
-                            workspace=workspace,
-                        )
-                    finally:
-                        # Sentinel so the drainer knows to stop.
-                        await _progress_q.put(None)
-
-                _tool_task = asyncio.create_task(_run_tool())
-                # Drain progress events as they arrive — block until the
-                # next event OR the tool finishes (sentinel = None).
-                while True:
-                    evt = await _progress_q.get()
-                    if evt is None:
-                        break
+                if (
+                    block.tool_type in _DANGEROUS_TOOLS
+                    and session_id
+                    and not _is_allowed(session_id, block.tool_type)
+                ):
+                    _appr_id = _new_approval_id()
                     yield (
-                        f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
+                        f'data: {json.dumps({"type": "approval_required", "approval_id": _appr_id, "tool": block.tool_type, "command": cmd_display, "round": round_num})}\n\n'
                     )
-                desc, result = await _tool_task
+                    _decision = await _wait_for_approval(_appr_id)
+                    if _decision == "deny":
+                        _approval_denied = True
+                        desc = f"{block.tool_type}: negado pelo utilizador"
+                        result = {"error": "Execução negada pelo utilizador.", "exit_code": 1, "blocked": True}
+                        logger.info("Agent tool denied by user approval gate: %s", block.tool_type)
+
+                if not _approval_denied:
+                    yield (
+                        f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "round": round_num})}\n\n'
+                    )
+
+                    # Streaming progress for long-running tools (bash, python).
+                    # The bash/python branches inside _direct_fallback emit
+                    # periodic {elapsed_s, tail} payloads via this callback;
+                    # we forward each one as a `tool_progress` SSE event so
+                    # the UI can render live elapsed-time + tail-of-output.
+                    _progress_q: asyncio.Queue = asyncio.Queue()
+                    async def _push_progress(payload):
+                        await _progress_q.put(payload)
+
+                    async def _run_tool():
+                        try:
+                            return await execute_tool_block(
+                                block,
+                                session_id=session_id,
+                                disabled_tools=disabled_tools,
+                                tool_policy=tool_policy,
+                                owner=owner,
+                                progress_cb=_push_progress,
+                                workspace=workspace,
+                            )
+                        finally:
+                            # Sentinel so the drainer knows to stop.
+                            await _progress_q.put(None)
+
+                    _tool_task = asyncio.create_task(_run_tool())
+                    # Drain progress events as they arrive — block until the
+                    # next event OR the tool finishes (sentinel = None).
+                    while True:
+                        evt = await _progress_q.get()
+                        if evt is None:
+                            break
+                        yield (
+                            f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
+                        )
+                    desc, result = await _tool_task
 
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"

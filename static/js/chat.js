@@ -1386,7 +1386,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress' || json.type === 'approval_required') {
                 clearResponseTimeout();
                 clearProcessingProbe();
               }
@@ -2252,6 +2252,45 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // agent_step in the same SSE chunk can cancel it before it shows)
                 _scheduleThinkingSpinner();
                 uiModule.scrollHistory();
+
+              } else if (json.type === 'approval_required') {
+                // --- Penelope agent approval gate ---
+                if (!_isBg) {
+                  const _apprId = json.approval_id || '';
+                  const _apprTool = json.tool || '';
+                  const _apprCmd = json.command || '';
+                  const _apprSid = streamSessionId || '';
+                  const chatBox = document.getElementById('chat-history');
+                  const panel = document.createElement('div');
+                  panel.className = 'agent-approval-panel';
+                  panel.dataset.approvalId = _apprId;
+                  panel.innerHTML = `
+                    <div class="agent-approval-header">
+                      <span class="agent-approval-icon">⚠</span>
+                      <strong>${esc(_apprTool)}</strong> quer executar:
+                    </div>
+                    <pre class="agent-approval-cmd">${esc(_apprCmd.slice(0, 300))}</pre>
+                    <div class="agent-approval-actions">
+                      <button class="agent-approval-btn allow-once" data-decision="allow_once">Permitir uma vez</button>
+                      <button class="agent-approval-btn allow-session" data-decision="allow_session">Permitir nesta sessão</button>
+                      <button class="agent-approval-btn deny" data-decision="deny">Negar</button>
+                    </div>`;
+                  chatBox && chatBox.appendChild(panel);
+                  uiModule.scrollHistory();
+                  panel.querySelectorAll('.agent-approval-btn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                      const decision = btn.dataset.decision;
+                      try {
+                        await fetch('/api/agent/approve', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ approval_id: _apprId, decision, session_id: _apprSid, tool: _apprTool }),
+                        });
+                      } catch (_e) { /* best effort */ }
+                      panel.remove();
+                    });
+                  });
+                }
 
               } else if (json.type === 'doc_stream_open') {
                 if (_isBg) {
@@ -3429,7 +3468,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                      json.type === 'tool_progress' || json.type === 'agent_step' ||
                      json.type === 'web_sources' || json.type === 'rag_sources' ||
                      json.type === 'research_progress' || json.type === 'research_sources' ||
-                     json.type === 'research_findings' || json.type === 'research_done') {
+                     json.type === 'research_findings' || json.type === 'research_done' ||
+                     json.type === 'approval_required') {
             rich = true;
           }
         }

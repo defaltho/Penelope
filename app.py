@@ -864,6 +864,30 @@ async def get_version():
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+
+@app.post("/api/agent/approve")
+async def agent_approve(request: Request):
+    """Penelope agent approval gate — receive user decision for a pending tool.
+
+    Body JSON: {approval_id, decision, session_id, tool}
+    decision: "allow_once" | "allow_session" | "allow_always" | "deny"
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+    approval_id = body.get("approval_id", "")
+    decision = body.get("decision", "deny")
+    session_id = body.get("session_id", "")
+    tool = body.get("tool", "")
+    if decision not in ("allow_once", "allow_session", "allow_always", "deny"):
+        raise HTTPException(400, "Invalid decision")
+    from src.agent_approval import record_decision
+    found = record_decision(approval_id, decision, session_id=session_id, tool_name=tool)
+    if not found:
+        raise HTTPException(404, "Approval ID not found or already decided")
+    return {"ok": True, "decision": decision}
+
 @app.get("/api/ready")
 async def readiness_check() -> JSONResponse:
     """Readiness / integrity self-check — DB, data dir, local-first storage.
