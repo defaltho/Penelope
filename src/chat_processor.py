@@ -42,11 +42,12 @@ def _content_tokens(text: str) -> list:
 
 
 class ChatProcessor:
-    def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None):
+    def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None, mem0_service=None):
         self.memory_manager = memory_manager
         self.personal_docs_manager = personal_docs_manager
         self.memory_vector = memory_vector
         self.skills_manager = skills_manager
+        self.mem0_service = mem0_service
 
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
@@ -245,6 +246,15 @@ class ChatProcessor:
                     self.memory_manager.increment_uses(_used_ids)
                 except Exception as _e:
                     logger.warning("Failed to increment memory uses: %s", _e)
+
+            # Mem0 consolidated facts (Penelope-style fenced anti-injection block)
+            if self.mem0_service is not None:
+                try:
+                    mem0_block = self.mem0_service.retrieve(message, owner=owner)
+                    if mem0_block:
+                        preface.append({"role": "system", "content": mem0_block})
+                except Exception as _e:
+                    logger.warning("Mem0 retrieve failed: %s", _e)
 
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)

@@ -524,6 +524,7 @@ set_session_manager_instance(session_manager)
 app.state.session_manager = session_manager
 memory_manager    = components["memory_manager"]
 memory_vector     = components.get("memory_vector")
+mem0_service      = components.get("mem0_service")
 upload_handler    = components["upload_handler"]
 app.state.upload_handler = upload_handler
 personal_docs_mgr = components["personal_docs_manager"]
@@ -605,6 +606,7 @@ app.include_router(setup_chat_routes(
     memory_vector=memory_vector,
     webhook_manager=webhook_manager,
     skills_manager=skills_manager,
+    mem0_service=mem0_service,
 ))
 
 # Research (background deep-research tasks)

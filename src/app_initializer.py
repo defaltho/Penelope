@@ -78,8 +78,17 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         NativeMemoryProvider(memory_manager, memory_vector),
     ])
 
+    # Initialize Mem0Service (Penelope intelligent memory layer)
+    mem0_service = None
+    try:
+        from services.memory.mem0 import Mem0Service
+        mem0_service = Mem0Service(memory_manager, memory_vector)
+        logger.info("Mem0Service initialized")
+    except Exception as e:
+        logger.warning("Mem0Service init failed (memory consolidation disabled): %s", e)
+
     # Initialize processors
-    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager)
+    chat_processor = ChatProcessor(memory_manager, personal_docs_manager, memory_vector=memory_vector, skills_manager=skills_manager, mem0_service=mem0_service)
     research_handler = ResearchHandler()
     
     # Initialize chat handler with all dependencies
@@ -104,6 +113,7 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     return {
         "memory_manager": memory_manager,
         "memory_vector": memory_vector,
+        "mem0_service": mem0_service,
         "memory_provider_registry": memory_provider_registry,
         "skills_manager": skills_manager,
         "session_manager": session_manager,

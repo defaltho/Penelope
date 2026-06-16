@@ -334,6 +334,7 @@ def setup_chat_routes(
     memory_vector=None,
     webhook_manager=None,
     skills_manager=None,
+    mem0_service=None,
 ) -> APIRouter:
     router = APIRouter(tags=["chat"])
 
@@ -443,6 +444,7 @@ def setup_chat_routes(
             character_name=ctx.preset.character_name,
             owner=ctx.user,
             allow_background_extraction=not tool_policy.block_all_tool_calls,
+            mem0_service=mem0_service,
         )
 
         return {"response": reply}
@@ -1130,6 +1132,7 @@ def setup_chat_routes(
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    mem0_service=mem0_service,
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1257,12 +1260,13 @@ def setup_chat_routes(
                                     last_metrics, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
-                                                            agent_rounds=_agent_rounds,
+                                    agent_rounds=_agent_rounds,
                                     agent_tool_calls=_agent_tool_calls,
                                     skills_manager=skills_manager,
                                     owner=_user,
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    mem0_service=mem0_service,
                                 )
                             _stream_set(session, status="done")
                             yield chunk

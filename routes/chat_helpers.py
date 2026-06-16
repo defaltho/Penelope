@@ -1008,6 +1008,7 @@ def run_post_response_tasks(
     owner: str = None,
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
+    mem0_service=None,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1037,6 +1038,16 @@ def run_post_response_tasks(
         _extraction_jobs.append(("memory", extract_and_store(
             sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
+        )))
+
+    # Mem0 consolidation — runs on same frequency gate as extraction above
+    if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True) and mem0_service is not None:
+        from src.task_endpoint import resolve_task_endpoint
+        m0_url, m0_model, m0_headers = resolve_task_endpoint(
+            sess.endpoint_url, sess.model, sess.headers, owner=owner,
+        )
+        _extraction_jobs.append(("mem0", mem0_service.remember(
+            sess, m0_url, m0_model, m0_headers,
         )))
 
     # Skill extraction from complex agent runs. Only when the user actually
