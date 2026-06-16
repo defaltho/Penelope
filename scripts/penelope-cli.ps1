@@ -20,14 +20,18 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
-# Prefer project venv, fall back to uv run
-$VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+# python -m cli must run from the project root so Python finds the cli package
+Push-Location $ProjectRoot
+try {
+    $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 
-if (Test-Path $VenvPython) {
-    & $VenvPython -m cli @Args
-} elseif (Get-Command uv -ErrorAction SilentlyContinue) {
-    Set-Location $ProjectRoot
-    uv run python -m cli @Args
-} else {
-    python -m cli @Args
+    if (Test-Path $VenvPython) {
+        & $VenvPython -m cli @Args
+    } elseif (Get-Command uv -ErrorAction SilentlyContinue) {
+        uv run python -m cli @Args
+    } else {
+        python -m cli @Args
+    }
+} finally {
+    Pop-Location
 }
