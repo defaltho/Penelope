@@ -1,8 +1,8 @@
 """
 memory_server.py
 
-MCP server exposing memory management (list, add, edit, delete, search).
-Imports MemoryManager and MemoryVectorStore from the Odysseus codebase.
+MCP server exposing memory management (list, add, edit, delete, search)
+plus Penelope's Mem0-style intelligent memory layer (retrieve, add_fact).
 """
 
 import asyncio
@@ -21,12 +21,13 @@ server = Server("memory")
 # Late-initialized managers (set during first tool call)
 _memory_manager = None
 _memory_vector = None
+_mem0_service = None
 _initialized = False
 
 
 def _ensure_init():
     """Lazy-init memory managers on first use."""
-    global _memory_manager, _memory_vector, _initialized
+    global _memory_manager, _memory_vector, _mem0_service, _initialized
     if _initialized:
         return
     _initialized = True
@@ -42,6 +43,12 @@ def _ensure_init():
             _memory_vector = None
     except Exception:
         _memory_vector = None
+
+    try:
+        from services.memory.mem0 import Mem0Service
+        _mem0_service = Mem0Service(_memory_manager, _memory_vector)
+    except Exception:
+        _mem0_service = None
 
 
 @server.list_tools()
@@ -68,16 +75,52 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["action"],
             },
-        )
+        ),
+        Tool(
+            name="mem0_memory",
+            description=(
+                "Penelope's intelligent memory layer (Mem0-style). "
+                "Use 'retrieve' to get consolidated facts relevant to a query (returns a fenced context block). "
+                "Use 'add_fact' to directly persist a durable user fact without LLM extraction."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["retrieve", "add_fact"],
+                        "description": "retrieve — semantic search of consolidated memories; add_fact — persist a new fact directly",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Query text for retrieve, or fact text for add_fact",
+                    },
+                    "fact_type": {
+                        "type": "string",
+                        "enum": ["preference", "profile", "financial", "language", "other"],
+                        "description": "Category for add_fact (default: other)",
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Owner / user identifier (optional, for multi-user setups)",
+                    },
+                },
+                "required": ["action", "text"],
+            },
+        ),
     ]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    _ensure_init()
+
+    if name == "mem0_memory":
+        return await _handle_mem0(arguments)
+
     if name != "manage_memory":
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
-    _ensure_init()
     if not _memory_manager:
         return [TextContent(type="text", text="Error: Memory manager not available")]
 
@@ -196,6 +239,42 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     else:
         return [TextContent(type="text", text=f"Error: Unknown action '{action}'. Use: list, add, edit, delete, search")]
+
+
+async def _handle_mem0(arguments: dict) -> list[TextContent]:
+    if not _mem0_service:
+        return [TextContent(type="text", text="Error: Mem0 service not available")]
+
+    action = arguments.get("action", "")
+    text = (arguments.get("text") or "").strip()
+    owner = arguments.get("owner") or None
+
+    if not text:
+        return [TextContent(type="text", text="Error: 'text' is required")]
+
+    if action == "retrieve":
+        block = _mem0_service.retrieve(text, owner=owner)
+        if not block:
+            return [TextContent(type="text", text="No relevant memories found.")]
+        return [TextContent(type="text", text=block)]
+
+    elif action == "add_fact":
+        from services.memory.mem0_schemas import ConsolidationDecision, ExtractedFact, FactType, Operation
+        raw_type = arguments.get("fact_type", "other")
+        try:
+            ft = FactType(raw_type)
+        except ValueError:
+            ft = FactType.other
+        fact = ExtractedFact(text=text, fact_type=ft)
+        existing = _memory_manager.load(owner=owner) if owner else _memory_manager.load()
+        decision = ConsolidationDecision(operation=Operation.ADD)
+        changed = _mem0_service._apply(decision, fact, existing, owner)
+        if changed:
+            return [TextContent(type="text", text=f"Fact added: [{ft.value}] {text}")]
+        return [TextContent(type="text", text=f"Fact already known or not persisted: {text}")]
+
+    else:
+        return [TextContent(type="text", text=f"Error: Unknown action '{action}'. Use: retrieve, add_fact")]
 
 
 async def run():
