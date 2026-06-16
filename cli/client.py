@@ -132,6 +132,43 @@ class PenelopeClient:
         except Exception:
             return []
 
+    def add_fact(self, text: str, category: str = "preference", source: str = "user") -> dict:
+        try:
+            resp = self._post("/api/memory/add", json={"text": text, "category": category, "source": source})
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
+    def delete_fact(self, memory_id: str) -> dict:
+        try:
+            resp = self.client.delete(f"/api/memory/{memory_id}")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
+    def pin_fact(self, memory_id: str, pinned: bool = True) -> dict:
+        try:
+            resp = self.client.post(f"/api/memory/{memory_id}/pin", data={"pinned": str(pinned).lower()})
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
+    def approve_decision(self, approval_id: str, decision: str, session_id: str, tool: str) -> dict:
+        try:
+            resp = self._post("/api/agent/approve", json={
+                "approval_id": approval_id,
+                "decision": decision,
+                "session_id": session_id,
+                "tool": tool,
+            })
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            return {}
+
     # -- Skills --
 
     def list_skills(self) -> list[dict]:
@@ -276,5 +313,9 @@ def _normalize_event(event: str, payload: dict) -> list[tuple[str, dict]]:
             return [("done", payload)]
         if t == "error":
             return [("error", {"error": payload.get("message", "Erro desconhecido")})]
+        if t == "approval_required":
+            return [("approval", payload)]
+        if t == "memories_used":
+            return [("memories_used", payload)]
 
     return []

@@ -41,6 +41,15 @@ def chat(message: str, model: str | None, session: str | None, incognito: bool, 
                     full_response += token
                 else:
                     print_token(token)
+            elif event == "approval":
+                from cli.approval import prompt_approval
+                decision = prompt_approval(data.get("tool", "?"), data.get("command", ""))
+                client.approve_decision(
+                    approval_id=data.get("approval_id", ""),
+                    decision=decision,
+                    session_id=session or "",
+                    tool=data.get("tool", ""),
+                )
             elif event == "error":
                 print_error(data.get("error", "erro desconhecido"))
                 sys.exit(1)

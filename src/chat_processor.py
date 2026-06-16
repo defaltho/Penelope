@@ -253,6 +253,10 @@ class ChatProcessor:
                     mem0_block = self.mem0_service.retrieve(message, owner=owner)
                     if mem0_block:
                         preface.append({"role": "system", "content": mem0_block})
+                        for line in mem0_block.splitlines():
+                            stripped = line.lstrip("- ").strip()
+                            if stripped and not stripped.startswith("<") and not stripped.startswith("["):
+                                self._last_used_memories.append({"text": stripped, "category": "mem0", "type": "mem0"})
                 except Exception as _e:
                     logger.warning("Mem0 retrieve failed: %s", _e)
 

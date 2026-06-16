@@ -730,6 +730,30 @@ class PenelopeTUI:
                     _flush_feed()
                     renderer.feed(tok)
 
+                elif event == "approval":
+                    _flush_feed()
+                    renderer.flush()
+                    from cli.approval import prompt_approval
+                    decision = prompt_approval(
+                        payload.get("tool", "?"),
+                        payload.get("command", ""),
+                    )
+                    self.client.approve_decision(
+                        approval_id=payload.get("approval_id", ""),
+                        decision=decision,
+                        session_id=self.conversation_id or "",
+                        tool=payload.get("tool", ""),
+                    )
+                    self._set_spinner(status_text("thinking"))
+
+                elif event == "memories_used":
+                    facts = payload.get("data", [])
+                    if facts:
+                        mem0_count = sum(1 for f in facts if f.get("type") == "mem0")
+                        label = f"Mem0: {mem0_count} factos" if mem0_count else f"Memória: {len(facts)} factos"
+                        activities.append(("memory", label, 0.0))
+                        self._set_spinner(status_text("memory"))
+
                 elif event == "error":
                     _flush_feed()
                     renderer.flush()
