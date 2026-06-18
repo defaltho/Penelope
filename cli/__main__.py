@@ -26,7 +26,7 @@ from cli.commands.web import web
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.3.0", prog_name="penelope")
+@click.version_option(version="1.5", prog_name="penelope")
 @click.option("--model", "-m", "model_override", default=None, help="Modelo a usar no modo interactivo.")
 @click.pass_context
 def cli(ctx: click.Context, model_override: str | None) -> None:

@@ -903,32 +903,16 @@ class PenelopeTUI:
         print_info(t("websearch.label"), t("websearch.on") if self.web_search else t("websearch.off"))
 
     def _cmd_web_server(self) -> None:
-        import socket
-
         project_root = Path(__file__).resolve().parent.parent
-        backend_dir = project_root / "backend"
-        frontend_dir = project_root / "frontend"
-
+        port = 7000
         ollama_url = "http://127.0.0.1:11434"
-        backend_port = 8000
-        frontend_port = 5173
-        backend_url = f"http://127.0.0.1:{backend_port}"
-        app_url = f"http://localhost:{frontend_port}"
+        app_url = f"http://127.0.0.1:{port}"
 
-        uv_exe = shutil.which("uv")
-        npm_exe = shutil.which("npm")
-
-        if not uv_exe:
-            print_error(t("web.uv_missing"))
-            return
-        if not npm_exe:
-            print_error(t("web.npm_missing"))
-            return
+        venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+        python_exe = str(venv_python) if venv_python.exists() else "python"
 
         procs: list[subprocess.Popen] = []
         ollama_started = False
-        backend_already_running = False
-        frontend_already_running = False
 
         try:
             # --- Ollama ---
@@ -949,53 +933,28 @@ class PenelopeTUI:
                 print_error(t("web.ollama.missing"))
                 return
 
-            # --- Backend ---
-            if self._port_in_use(backend_port):
-                print_info(t("web.backend.label"), t("web.backend.running", p=backend_port))
-                backend_already_running = True
+            # --- Backend (FastAPI on port 7000) ---
+            if self._port_in_use(port):
+                print_info(t("web.backend.label"), t("web.backend.running", p=port))
             else:
-                print_info(t("web.backend.label"), t("web.backend.starting", p=backend_port))
+                print_info(t("web.backend.label"), t("web.backend.starting", p=port))
                 backend_proc = subprocess.Popen(
-                    [uv_exe, "run", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(backend_port)],
-                    cwd=str(backend_dir),
+                    [python_exe, "-m", "uvicorn", "app:app",
+                     "--host", "127.0.0.1", f"--port={port}"],
+                    cwd=str(project_root),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 procs.append(backend_proc)
+                self._wait_for_url(f"{app_url}/api/health", timeout=40)
 
-            # --- Frontend ---
-            if self._port_in_use(frontend_port):
-                print_info(t("web.frontend.label"), t("web.backend.running", p=frontend_port))
-                frontend_already_running = True
-            else:
-                node_modules = frontend_dir / "node_modules"
-                if not node_modules.exists():
-                    print_info(t("web.frontend.label"), t("web.frontend.installing"))
-                    subprocess.run(
-                        [npm_exe, "install"],
-                        cwd=str(frontend_dir),
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=True,
-                    )
-
-                print_info(t("web.frontend.label"), t("web.frontend.starting", p=frontend_port))
-                frontend_proc = subprocess.Popen(
-                    [npm_exe, "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],
-                    cwd=str(frontend_dir),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                procs.append(frontend_proc)
-
-            # --- Wait and open browser ---
-            if self._wait_for_url(app_url, timeout=40):
-                print_success(t("web.ready", url=app_url))
+            # --- Open browser ---
+            print_info(t("web.url.label"), app_url)
+            try:
                 webbrowser.open(app_url)
-            else:
-                print_info(t("web.url.label"), t("web.url.manual", url=app_url))
+            except Exception:
+                pass
 
             self.console.print()
             if not procs:
