@@ -60,6 +60,12 @@ Thumbs.db
 cache/
 output.txt.txt
 
+# Temp files
+_akita_body_clean.html
+
+# Old Svelte frontend (not part of this branch)
+frontend/
+
 # Media (uploaded/generated)
 *.jpg
 *.jpeg
